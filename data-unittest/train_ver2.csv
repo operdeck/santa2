@@ -1,0 +1,7 @@
+ncodpers	fecha_dato	segmento	renta	ult_fec_cli_1t	indrel_1mes	conyuemp	ind_A_ult1	ind_B_ult1
+1000	2016-11-15	Uni	10	2016-08-23	beta	gamma	0	0
+1000	2016-12-15	Uni	10	2016-07-15	alpha	gamma	0	1
+1000	2017-01-15	Uni	20	2014-08-15	gamma	alpha	1	0
+2000	2016-11-15	Pro	10	2016-06-23	gamma	alpha	0	0
+2000	2016-12-15	Pro	20	2016-06-15	beta	alpha	1	1
+2000	2017-01-15	Pro	10	2014-08-18	gamma	beta	1	1
