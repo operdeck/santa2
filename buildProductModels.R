@@ -80,8 +80,7 @@ all <- lastMonthProducts[all]
 
 for (f in productFlds) {
   all[[paste("products",f,sep=".")]] <- 
-    ifelse(is.na(all[[f]]) | is.na(all[[paste("xf.prev",f,sep=".")]]), NA, (all[[f]] == 1) & (all[[paste("xf.prev",f,sep=".")]] == 0))
-
+    as.numeric(ifelse(is.na(all[[f]]) | is.na(all[[paste("xf.prev",f,sep=".")]]), NA, (all[[f]] == 1) & (all[[paste("xf.prev",f,sep=".")]] == 0)))
 }
 
 all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
@@ -113,26 +112,39 @@ for (ds in c("Test","Train")) {
 
 outcomeCols <- paste("products",productFlds,sep=".")
 
-# Should be rows from the train set
 modelRowz <- which(all$dataset == "Train" & !is.na(all$products.newcount))
 modelTrainFlds <- which(!startsWith(names(all), "products.") & !names(all) %in% productFlds)
 
 trainMatrix <- as.matrix((all[modelRowz, modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
+testMatrix <- as.matrix((all[dataset=="Test", modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
+
 param <- list("objective" = "binary:logistic",
+              max.depth = 5,
+              eta = 0.01,
               "eval_metric" = "auc") # make sure to maximize!
 cv.nround <- 5
 cv.nfold <- 3
 nround = 5
 
+results <- data.frame(ncodpers=all[dataset=="Test", ncodpers])
+
 for (col in outcomeCols) {
-  print(col)
-  if (length(unique(as.integer(all[[col]][modelRowz]))) < 2) {
+  cat(which(col==outcomeCols),"/",length(outcomeCols),":",col,fill=T)
+  y <- as.integer(all[[col]][modelRowz])
+  yrate <- sum(y)/length(y)
+  results[[col]] <- 0
+  if (length(unique(y)) < 2) {
+    cat("Skipping",col,": too few distinct values,",length(unique(y)),fill=T)
     next
   }
-  bst.cv = xgb.cv(param=param, data = trainMatrix, missing=NaN,
-                  label = as.integer(all[[col]][modelRowz]), 
-                  nfold = cv.nfold, nrounds = cv.nround, maximize=T)
-  bst = xgboost(param=param, data = trainMatrix, missing=NaN,
+  if (yrate < 0.001) {
+    cat("Skipping",col,": too low rate,",yrate,fill=T)
+    next
+  }
+  # bst.cv = xgb.cv(param=param, data = trainMatrix, missing=NaN,
+  #                 label = y, 
+  #                 nfold = cv.nfold, nrounds = cv.nround, maximize=T)
+  bst = xgboost(params=param, data = trainMatrix, missing=NaN,
                 label = as.integer(all[[col]][modelRowz]), 
                 nrounds=nround, maximize=T)
   
@@ -142,53 +154,14 @@ for (col in outcomeCols) {
 
   # xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
   # xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
+  
+  predictions <- predict(bst, testMatrix, missing=NaN)
+  print(summary(predictions))
+  results[[col]] <- predictions
 }
 
-# Goal
-# From products 2015-01-28 01:00:00 - 2016-05 predict what they will have 1 month later
+# normalize
+avgOutcome <- sum(all[dataset=="Train", outcomeCols, with=F], na.rm=T) / sum(all$dataset == "Train")
+sum(select(results, -ncodpers) > 0.57) / nrow(results)
 
-# Thoughts
-# Train on 2015-01 - 2016-04 --> 2016-05, predict 2015-02 - 2016-05 --> 2016-06 ? or
-# Train simply based on current month --> next month?
-# Products are not independent. Encode as one big factor? Cols 25:48
-
-# We could try independent predictions first
-# Maybe massage the output to fit with the original
-
-# this gets 12.220 different product combinations
-# train <- unite(train, productsCombined, ind_ahor_fin_ult1:ind_recibo_ult1)
-
-# For now maybe just predict next month?
-# ind-xyz = f(status pref month), 47 models
-
-#             p1 p1-added-next-month model
-# 01-14 ABS   0  F                   0.5
-# 02-14 ABS   0  T                   0.8
-# 03-14 ABS   1  F                   0.7
-# 04-14 ABS   1  F                   0.6
-# 05-14 ABS   0  F                   0.3
-
-# find which date has highest model output; compare that to a threshold
-
-# Given some predictions for several prods
-# p1  p2  p3
-# 0.6 0.4 0.8
-# which actual product combination is closest, given that not all are possible
-# (0,  1,  1)
-# (1,  0,  1) <<-- most likely combination, pick that one
-# (1,  1,  0)
-
-
-# outcomes
-stop()
-# Any help from standard R ts funcs?
-# save a numeric vector containing 72 monthly observations
-# from Jan 2009 to Dec 2014 as a time series object
-myts <- ts(train$ind_deme_fin_ult1, start=c(2015, 1), end=c(2016, 5), frequency=12) 
-
-# subset the time series (June 2014 to December 2014)
-myts2 <- window(myts, start=c(2015, 6), end=c(2015, 12)) 
-
-# plot series
-plot(myts)
-
+qplot(as.vector(as.matrix(select(results, -ncodpers))), geom="density")
