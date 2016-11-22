@@ -19,7 +19,7 @@ library(DiagrammeR)
 # Read data
 
 data_folder <- "data"
-data_folder <- "data-unittest"
+# data_folder <- "data-unittest"
 
 data_colClasses = list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
 data_dateFlds = c("fecha_dato","fecha_alta","ult_fec_cli_1t")
@@ -27,25 +27,25 @@ data_dateFlds = c("fecha_dato","fecha_alta","ult_fec_cli_1t")
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), 
                colClasses = data_colClasses)
 
+productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
+
 # Sample to speed up development
 set.seed(12345)
-cat("Before dev sampling", dim(train), fill = T)
+allPersonz <- unique(train$ncodpers)
+cat("Before dev sampling train size:", dim(train), "unique persons:",length(allPersonz),fill = T)
 if (nrow(train) > 1000000) {
-  train <- train[ncodpers %in% sample(train$ncodpers, trunc(0.10*nrow(train))),]
+  train <- train[ncodpers %in% sample(allPersonz, trunc(0.10*length(allPersonz))),]
 }
-cat("After dev sampling", dim(train), fill = T)
-
-productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
+allPersonz <- unique(train$ncodpers)
+cat("After dev sampling train size:", dim(train), "unique persons:",length(allPersonz),fill = T)
 
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), 
               colClasses = data_colClasses)
 
-# Concatenate both into one set but keep the rownumbers. Concatenating both
-# makes it a lot easier to do all the data processing and generation of derived fields.
-trainRowz <- seq(nrow(train))
-testRowz <- max(trainRowz)+seq(nrow(test))
+# Concatenate both into one set makes it a lot easier to do all the 
+# data processing and generation of derived fields.
 all <- bind_rows(train, test)
-all$dataset <- c(rep("Train", length(trainRowz)), rep("Test", length(testRowz)))
+all$dataset <- c(rep("Train", nrow(train)), rep("Test", nrow(test)))
 rm(list=c("train","test"))
 
 for(f in intersect(data_dateFlds, names(all))) { 
@@ -74,7 +74,6 @@ lastMonthProducts <- all[,c("ncodpers","xf.monthnr",productFlds),with=F]
 lastMonthProducts$xf.monthnr <- lastMonthProducts$xf.monthnr+1
 names(lastMonthProducts)[2+seq(length(productFlds))] <- paste("xf.prev",productFlds,sep=".")
 setkey(lastMonthProducts, ncodpers, xf.monthnr)
-
 all <- lastMonthProducts[all]
 
 # Set outcome
@@ -86,27 +85,39 @@ for (f in productFlds) {
 }
 
 all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
-all$xf.products.newcount <- rowSums(all[,paste("products",productFlds,sep="."),with=F])
+all$products.newcount <- rowSums(all[,paste("products",productFlds,sep="."),with=F])
 
-print(ggplot(filter(all, !is.na(xf.products.newcount)), 
-             aes(xf.products.newcount,fill=dataset))+
+print(ggplot(filter(all, !is.na(products.newcount)), 
+             aes(products.newcount))+
         geom_histogram(binwidth = 1)+
         scale_y_log10()+
         ggtitle("Distribution of new prods in next month"))
 
-stop()
+# summaries for data check
+for (ds in c("Test","Train")) {
+  cat("Size of",ds,":",nrow(filter(all, dataset==ds)),fill=T)
+  cat("Missing prev products in",ds,":",
+      sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.products.count))),fill=T)
+  cat("Missing outcomes in",ds,":",
+      sum(is.na(filter(all, dataset==ds) %>% select(products.newcount))),fill=T)
+  cat("First month by person for", ds, ":",
+      nrow(group_by(filter(all, dataset==ds), ncodpers) %>% summarise(firstMonth = min(xf.monthnr))),fill=T)
+}
 
 # More derived features
 
 # TODO!
 
+# Build Models
 # Create a model for each outcome individually
-outcomeCols <- names(train)[startsWith(names(train),"purchased_ind_")]
 
-# outcomeCols <- c("purchased.ind_nomina_ult1")
-trainRowz <- which(!is.na(train$purchased.count))
-trainMatrix <- as.matrix((train[trainRowz, which(!startsWith(names(train), "purchased.")), with=F])
-                         [,lapply(.SD,as.numeric)]) # factors/syms --> numeric
+outcomeCols <- paste("products",productFlds,sep=".")
+
+# Should be rows from the train set
+modelRowz <- which(all$dataset == "Train" & !is.na(all$products.newcount))
+modelTrainFlds <- which(!startsWith(names(all), "products.") & !names(all) %in% productFlds)
+
+trainMatrix <- as.matrix((all[modelRowz, modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
 param <- list("objective" = "binary:logistic",
               "eval_metric" = "auc") # make sure to maximize!
 cv.nround <- 5
@@ -115,14 +126,14 @@ nround = 5
 
 for (col in outcomeCols) {
   print(col)
-  if (length(unique(as.integer(train[[col]][trainRowz]))) < 2) {
+  if (length(unique(as.integer(all[[col]][modelRowz]))) < 2) {
     next
   }
   bst.cv = xgb.cv(param=param, data = trainMatrix, missing=NaN,
-                  label = as.integer(train[[col]][trainRowz]), 
+                  label = as.integer(all[[col]][modelRowz]), 
                   nfold = cv.nfold, nrounds = cv.nround, maximize=T)
   bst = xgboost(param=param, data = trainMatrix, missing=NaN,
-                label = as.integer(train[[col]][trainRowz]), 
+                label = as.integer(all[[col]][modelRowz]), 
                 nrounds=nround, maximize=T)
   
   # Compute & plot feature importance matrix & summary tree
