@@ -18,84 +18,85 @@ library(DiagrammeR)
 
 # Read data
 
+data_folder <- "data"
+data_folder <- "data-unittest"
+
 data_colClasses = list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
 data_dateFlds = c("fecha_dato","fecha_alta","ult_fec_cli_1t")
-train <- fread("data/train_ver2.csv", colClasses = data_colClasses, stringsAsFactors = T)
-for(f in data_dateFlds) { train[[f]] <- fasttime::fastPOSIXct(train[[f]])}
-productFlds <- names(train)[25:48]
 
-test <- fread("data/test_ver2.csv", colClasses = data_colClasses, stringsAsFactors = T)
-for(f in data_dateFlds) { test[[f]] <- fasttime::fastPOSIXct(test[[f]])}
+train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), 
+               colClasses = data_colClasses)
 
-train$monthNr <- year(train$fecha_dato)*12+month(train$fecha_dato)-1
-test$monthNr <- year(test$fecha_dato)*12+month(test$fecha_dato)-1
+# Sample to speed up development
+set.seed(12345)
+cat("Before dev sampling", dim(train), fill = T)
+if (nrow(train) > 1000000) {
+  train <- train[ncodpers %in% sample(train$ncodpers, trunc(0.10*nrow(train))),]
+}
+cat("After dev sampling", dim(train), fill = T)
 
-# train:
-# [ t0 : a, b, c ==> cum-ind 1, cum-ind 2, cum-ind 3 ]
-# [ t1 : a, b, c ==> cum-ind 1, cum-ind 2, cum-ind 3 ]
-# ...
-# [ tn : a, b, c ==> cum-ind 1, cum-ind 2, cum-ind 3 ]
-#
-# test:
-# [ tn+1 : a, b, c ]
+productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
-# Data summaries
-interactionFreqs <- group_by(train, ncodpers, segmento) %>%
+test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), 
+              colClasses = data_colClasses)
+
+# Concatenate both into one set but keep the rownumbers. Concatenating both
+# makes it a lot easier to do all the data processing and generation of derived fields.
+trainRowz <- seq(nrow(train))
+testRowz <- max(trainRowz)+seq(nrow(test))
+all <- bind_rows(train, test)
+all$dataset <- c(rep("Train", length(trainRowz)), rep("Test", length(testRowz)))
+rm(list=c("train","test"))
+
+for(f in intersect(data_dateFlds, names(all))) { 
+  all[[f]] <- fasttime::fastPOSIXct(all[[f]])
+  all[[paste("xf.year",f,sep=".")]] <- year(all[[f]])
+  all[[paste("xf.month",f,sep=".")]] <- month(all[[f]])
+}
+
+all$xf.monthnr <- all$xf.year.fecha_dato*12 + all$xf.month.fecha_dato - 1
+
+for (f in names(all)[sapply(all, class) == "character"]) {
+  all[[f]] <- factor(all[[f]])
+}
+
+# Quick data summaries
+
+interactionFreqs <- group_by(all, ncodpers, segmento) %>%
   summarise(n=n())
 print(ggplot(interactionFreqs, aes(as.factor(n), fill=segmento))+geom_bar()+
         ggtitle("Number of Records per Person"))
 
-# Sample for development
-set.seed(12345)
-cat("Before dev sampling", dim(train), fill = T)
-train <- train[ncodpers %in% sample(train$ncodpers, 100000),]
-cat("After dev sampling", dim(train), fill = T)
+setkey(all, ncodpers, xf.monthnr)
 
-setkey(train, ncodpers, monthNr)
-setkey(test, ncodpers, monthNr)
+# Add last month products as features to this month
+lastMonthProducts <- all[,c("ncodpers","xf.monthnr",productFlds),with=F]
+lastMonthProducts$xf.monthnr <- lastMonthProducts$xf.monthnr+1
+names(lastMonthProducts)[2+seq(length(productFlds))] <- paste("xf.prev",productFlds,sep=".")
+setkey(lastMonthProducts, ncodpers, xf.monthnr)
+
+all <- lastMonthProducts[all]
 
 # Set outcome
 
-# train:
-# [ t0 : -- ]
-# [ t1 : a, b, c + cum-ind 1 t0, cum-ind 2 t0, cum-ind 3 t0, other derived_features ==> ind 1, ind 2, ind 3 ]
-# ...
-# [ tn : a, b, c + cum-ind 1 tn-1, cum-ind 2 tn-1, cum-ind 3 tn-1, other derived_features ==> ind 1, ind 2, ind 3 ]
-#
-# test:
-# [ tn+1 : a, b, c + cum-ind 1 tn, cum-ind 2 tn, cum-ind 3 tn, other derived_features ==> [Y] ]
+for (f in productFlds) {
+  all[[paste("products",f,sep=".")]] <- 
+    ifelse(is.na(all[[f]]) | is.na(all[[paste("xf.prev",f,sep=".")]]), NA, (all[[f]] == 1) & (all[[paste("xf.prev",f,sep=".")]] == 0))
 
-# Lots of data.table mess to efficiently calculate things. Eventually,
-# purchased_xxx = TRUE if xxx is 1 in the next month and 0 currently
-# purchased_count = number of purchased_xxx that are true (for reporting/calibration)
-
-# add last row of train as a feature set to test
-lastMonthProducts <- train[monthNr == max(train$monthNr),c(productFlds,"ncodpers","monthNr"),with=F]
-lastMonthProducts$monthNr <- lastMonthProducts$monthNr+1
-names(lastMonthProducts) <- ifelse(startsWith(names(lastMonthProducts),"ind_"),
-                                   paste("prev",names(lastMonthProducts),sep="."),
-                                   names(lastMonthProducts))
-setkeyv(lastMonthProducts, key(test))
-test <- test[lastMonthProducts]
-
-# derive new products flags
-prevMonthProducts <- train[,c(productFlds,"ncodpers","monthNr"),with=F]
-prevMonthProducts[, nextMonthNr := monthNr+1]
-prevMonthProducts[, monthNr := NULL]
-setkey(prevMonthProducts, ncodpers, nextMonthNr)
-train <- train[prevMonthProducts,nomatch=0] # inner join, so first month will be out
-for (col in productFlds) {
-  train[[paste("prev",col,sep = ".")]] <- train[[paste("i",col,sep = ".")]]
-  train[[paste("i",col,sep = ".")]] <- NULL # clumsy rename i. --> prev.
-  train[[paste("purchased",col,sep = ".")]] <- train[[paste("prev",col,sep = ".")]]==0 & train[[col]]==1
-  train[[col]] <- NULL 
 }
-train[["purchased.count"]] <- rowSums(select(train, starts_with("purchased.")))
-print(ggplot(train, aes(purchased.count,fill=sexo))+geom_histogram(binwidth = 1)+
+
+all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
+all$xf.products.newcount <- rowSums(all[,paste("products",productFlds,sep="."),with=F])
+
+print(ggplot(filter(all, !is.na(xf.products.newcount)), 
+             aes(xf.products.newcount,fill=dataset))+
+        geom_histogram(binwidth = 1)+
         scale_y_log10()+
         ggtitle("Distribution of new prods in next month"))
 
-# Derived features
+stop()
+
+# More derived features
 
 # TODO!
 
