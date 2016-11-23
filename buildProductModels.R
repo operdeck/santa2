@@ -15,6 +15,8 @@ library(lubridate)
 require(xgboost)
 library(Ckmeans.1d.dp)
 library(DiagrammeR)
+library(pROC)
+library(corrplot)
 
 # Read data
 
@@ -34,7 +36,7 @@ set.seed(12345)
 allPersonz <- unique(train$ncodpers)
 cat("Before dev sampling train size:", dim(train), "unique persons:",length(allPersonz),fill = T)
 if (nrow(train) > 1000000) {
-  train <- train[ncodpers %in% sample(allPersonz, trunc(0.10*length(allPersonz))),]
+  train <- train[ncodpers %in% sample(allPersonz, trunc(0.20*length(allPersonz))),]
 }
 allPersonz <- unique(train$ncodpers)
 cat("After dev sampling train size:", dim(train), "unique persons:",length(allPersonz),fill = T)
@@ -115,6 +117,14 @@ outcomeCols <- paste("products",productFlds,sep=".")
 modelRowz <- which(all$dataset == "Train" & !is.na(all$products.newcount))
 modelTrainFlds <- which(!startsWith(names(all), "products.") & !names(all) %in% productFlds)
 
+outcomeColsValid <- 
+  sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
+
+# all out in https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html
+corrMatrix <- cor(as.matrix((all[modelRowz, outcomeCols[outcomeColsValid], with=F])))
+corrplot(corrMatrix, type="upper",order ="AOE")
+corrplot(corrMatrix, method="number",type="upper",order ="AOE")
+
 trainMatrix <- as.matrix((all[modelRowz, modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
 testMatrix <- as.matrix((all[dataset=="Test", modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
 
@@ -158,6 +168,12 @@ for (col in outcomeCols) {
   predictions <- predict(bst, testMatrix, missing=NaN)
   print(summary(predictions))
   results[[col]] <- predictions
+  
+  # test on train/validation set, get some accuracy idea
+  # TODO: keep part of the "Train" set as "Validation" and use that to double check things
+  predictions_train <- predict(bst, trainMatrix, missing=NaN)
+  truth_train <- as.integer(all[[col]][modelRowz])
+  cat("AUC on Train:",as.numeric(auc(truth_train, predictions_train)))
 }
 
 # normalize
