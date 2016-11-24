@@ -105,6 +105,19 @@ for (ds in c("Test","Train")) {
       nrow(group_by(filter(all, dataset==ds), ncodpers) %>% summarise(firstMonth = min(xf.monthnr))),fill=T)
 }
 
+# Some derived features
+
+# Count of the nr of instances per factor level
+factorCols <- names(all)[sapply(all, class)=="factor"]
+for (factorCol in factorCols) {
+  cat("Adding count of factor levels for",factorCol,fill=T)
+  grp <- data.table(group_by_(all, factorCol) %>% summarise(n_factorCol = n()))
+  names(grp)[2] <- paste("xf.n",factorCol,sep=".")
+  setkeyv(grp, factorCol)
+  setkeyv(all, factorCol)
+  all <- all[grp]
+}
+
 # More derived features
 
 # TODO!
@@ -120,7 +133,7 @@ modelTrainFlds <- which(!startsWith(names(all), "products.") & !names(all) %in% 
 outcomeColsValid <- 
   sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
 
-# all out in https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html
+# go all out see https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html
 corrMatrix <- cor(as.matrix((all[modelRowz, outcomeCols[outcomeColsValid], with=F])))
 corrplot(corrMatrix, type="upper",order ="AOE")
 corrplot(corrMatrix, method="number",type="upper",order ="AOE")
@@ -142,12 +155,12 @@ for (col in outcomeCols) {
   cat(which(col==outcomeCols),"/",length(outcomeCols),":",col,fill=T)
   y <- as.integer(all[[col]][modelRowz])
   yrate <- sum(y)/length(y)
-  results[[col]] <- 0
+  results[[col]] <- FALSE
   if (length(unique(y)) < 2) {
     cat("Skipping",col,": too few distinct values,",length(unique(y)),fill=T)
     next
   }
-  if (yrate < 0.001) {
+  if (yrate < 5e-4) {
     cat("Skipping",col,": too low rate,",yrate,fill=T)
     next
   }
@@ -165,19 +178,42 @@ for (col in outcomeCols) {
   # xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
   # xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
   
-  predictions <- predict(bst, testMatrix, missing=NaN)
-  print(summary(predictions))
-  results[[col]] <- predictions
-  
   # test on train/validation set, get some accuracy idea
   # TODO: keep part of the "Train" set as "Validation" and use that to double check things
   predictions_train <- predict(bst, trainMatrix, missing=NaN)
   truth_train <- as.integer(all[[col]][modelRowz])
-  cat("AUC on Train:",as.numeric(auc(truth_train, predictions_train)))
+  cat("AUC on Train:",as.numeric(auc(truth_train, predictions_train)),fill=T)
+  
+  # find optimal threshold to binarize the predictions
+  delta <- 0.5
+  th <- 0.5
+  target <- mean(truth_train)
+  for (itr in seq(20)) {
+    delta <- delta/2
+    preds_binarized <- (predictions_train > th)
+    current <- mean(preds_binarized)
+    # cat("Iteration",itr,"threshold",th,"target",target,"current",current,"delta",delta,fill=T)
+    if (current < target) {
+      th <- th - delta
+    } else {
+      th <- th + delta
+    }
+  }
+  predictions_train_binary <- (predictions_train > th)
+  cat("AUC on Train w threshold",th,":",
+      as.numeric(auc(truth_train, as.numeric(predictions_train_binary))),fill=T)
+
+  predictions <- predict(bst, testMatrix, missing=NaN)
+  print(summary(predictions))
+  results[[col]] <- (predictions > th)
 }
 
-# normalize
-avgOutcome <- sum(all[dataset=="Train", outcomeCols, with=F], na.rm=T) / sum(all$dataset == "Train")
-sum(select(results, -ncodpers) > 0.57) / nrow(results)
+# Concatenate names for selected products
+resultBinary <- select(results, -ncodpers)
+names(resultBinary) <- productFlds
+results$added_products <- apply(resultBinary, 1, function(row) { paste(productFlds[as.logical(row)],collapse=" ")})
 
-qplot(as.vector(as.matrix(select(results, -ncodpers))), geom="density")
+write.csv(select(results, ncodpers, added_products), "data/submission.csv",row.names = F)
+
+# subm <- fread("data/sample_submission.csv")
+# subm2 <- fread("data/submission.csv")
