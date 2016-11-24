@@ -244,7 +244,7 @@ resultBinary <- select(results, -ncodpers)
 names(resultBinary) <- productFlds
 results$added_products <- apply(resultBinary, 1, function(row) { paste(productFlds[as.logical(row)],collapse=" ")})
 
-write.csv(select(results, ncodpers, added_products), "data/submission.csv",row.names = F)
+write.csv(select(results, ncodpers, added_products), "data/submission.csv",row.names = F, quote=F)
 
 # subm <- fread("data/sample_submission.csv")
 # subm2 <- fread("data/submission.csv")
