@@ -22,7 +22,7 @@ library(scales)
 source("metrics.R")
 
 set.seed(12345)
-samplingRatio <- 0.4   # Sample ratio of full development set
+samplingRatio <- 0.1   # Sample ratio of full development set
 validationRatio <- 0.3 # Split training salmple into Train and Validate
 
 data_folder <- "data"
@@ -108,31 +108,58 @@ all <- lastMonthProducts[all]
 setkey(all, ncodpers, xf.monthnr)
 
 # Set outcome as the products newly purchased in the current month
-
 for (f in productFlds) {
-  all[[paste("products",f,sep=".")]] <- 
-    ifelse(is.na(all[[f]]) | is.na(all[[paste("xf.prev",f,sep=".")]]), 
-           NA, 
-           (all[[f]] == 1) & (all[[paste("xf.prev",f,sep=".")]] == 0))
+  all[[paste("change",f,sep=".")]] <-
+    # all[[f]] - all[[paste("xf.prev",f,sep=".")]]
+
+  factor(all[[f]] - all[[paste("xf.prev",f,sep=".")]],
+           levels=c(NA,0,1,-1),
+           labels=c("Maintained","Added","Dropped"))
 }
 
-all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
-all$products.newcount <- rowSums(all[,paste("products",productFlds,sep="."),with=F])
+# TODO - fix these sums / add added/maintained/dropped seperately
+# all$xf.prev.change.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
+# all$change.newcount <- rowSums(all[,paste("change",productFlds,sep="."),with=F])
 
-print(ggplot(filter(all, !is.na(products.newcount)), 
-             aes(products.newcount, fill=dataset))+
-        geom_histogram(binwidth = 1)+
-        scale_y_log10()+
-        ggtitle("Distribution of new product count"))
+# Plot of service changes by month
+# see https://www.kaggle.com/apryor6/santander-product-recommendation/detailed-cleaning-visualization/comments
+monthVar <- "xf.month.fecha_dato"
+allPrdChanges <- NULL
+for (f in productFlds) {
+  tmp <- all[, .N,by=c(paste("change",f,sep="."),monthVar)]
+  names(tmp)[1] <- "status"
+  names(tmp)[2] <- "month"
+  tmp$feature <- f
+  if (is.null(allPrdChanges)) { 
+    allPrdChanges <- tmp
+  } else {
+    allPrdChanges <- rbind(allPrdChanges, tmp)
+  }
+}
+# add 0's for those that only have NA or Maintained
+allPrdChanges <- spread(allPrdChanges, status, N, fill=0) %>% gather(status, N, -month,-feature)
+print(ggplot(filter(allPrdChanges, !is.na(status) & status != "Maintained" & status != "<NA>"), 
+       aes(y=N,x=factor(month.abb[month],levels=month.abb[seq(12,1,-1)])))+
+  geom_bar(aes(fill=status),stat="identity")+
+  facet_wrap(facets=~feature,ncol=6)+
+  coord_flip() + ylab("Count") + xlab("") + ggtitle("Service Changes by Month") +
+  scale_fill_manual(values=c("cyan","magenta"))+
+  theme_dark() +
+  theme(axis.text =element_text(size=8),
+        axis.text.x = element_text(angle = 45, hjust = 1)))
 
+print(group_by(allPrdChanges, 
+              feature, status) %>% summarise(n=sum(N)) %>%
+        spread(status, n) %>% arrange(Added))
+     
 # summaries for data check
 
 for (ds in unique(all$dataset)) {
   cat("Size of",ds,":",nrow(filter(all, dataset==ds)),fill=T)
   cat("Missing prev products in",ds,":",
-      sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.products.count))),fill=T)
+      sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.change.count))),fill=T)
   cat("Missing outcomes in",ds,":",
-      sum(is.na(filter(all, dataset==ds) %>% select(products.newcount))),fill=T)
+      sum(is.na(filter(all, dataset==ds) %>% select(change.newcount))),fill=T)
   cat("First month by person for", ds, ":",
       nrow(group_by(filter(all, dataset==ds), ncodpers) %>% summarise(firstMonth = min(xf.monthnr))),fill=T)
 }
@@ -144,12 +171,13 @@ for (ds in unique(all$dataset)) {
 # Build Models
 # Create a model for each outcome individually
 
-outcomeCols <- paste("products",productFlds,sep=".")
+outcomeCols <- paste("change",productFlds,sep=".")
 
-trainRowz <- which(all$dataset == "Train" & !is.na(all$products.newcount))
-validateRowz <- which(all$dataset == "Validate" & !is.na(all$products.newcount))
+# TODO: train/validate rowz is not static - depends on outcome col
+trainRowz <- which(all$dataset == "Train" & !is.na(all$change.newcount))
+validateRowz <- which(all$dataset == "Validate" & !is.na(all$change.newcount))
 testRowz <- which(all$dataset == "Test")
-modelTrainFlds <- names(all)[which(!startsWith(names(all), "products.") & !names(all) %in% productFlds)]
+modelTrainFlds <- names(all)[which(!startsWith(names(all), "change.") & !names(all) %in% productFlds)]
 
 outcomeColsValid <- 
   sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
@@ -179,6 +207,9 @@ auc.validate <- list()
 for (col in outcomeCols) {
   cat(which(col==outcomeCols),"/",length(outcomeCols),":",col,fill=T)
 
+  # TODO: fix up
+  # trainRowz is the outcome rows that are not NA
+  
   trainMatrix <- xgb.DMatrix(data.matrix(all[trainRowz, modelTrainFlds, with=F]), 
                              missing=NaN, 
                              label=all[[col]][trainRowz])
