@@ -22,7 +22,7 @@ library(scales)
 source("metrics.R")
 
 set.seed(12345)
-samplingRatio <- 0.2   # Sample ratio of full development set
+samplingRatio <- 0.4   # Sample ratio of full development set
 validationRatio <- 0.3 # Split training salmple into Train and Validate
 
 data_folder <- "data"
@@ -64,7 +64,7 @@ print(ggplot(group_by(all, dataset) %>% summarise(n = n(), pct = n()/nrow(all)),
 
 interactionFreqs <- group_by(all, ncodpers, dataset) %>% summarise(n=n())
 print(ggplot(interactionFreqs, aes(n, fill=dataset))+geom_bar()+
-        ggtitle("Number of Records per Person"))
+        ggtitle("Number of purchases per Person"))
 
 # Dates
 
@@ -91,6 +91,12 @@ for (f in names(all)[sapply(all, class) == "character"]) {
   all <- all[grp]
 }
 
+# Remaining fields to numerics - not needed, data.matrix will do that
+# for (f in setdiff(names(all)[sapply(all, class) != "numeric" & sapply(all, class) != "integer"], c("dataset"))) {
+#   cat("Transforming factor field",f,fill=T)
+#   all[[f]] <- as.numeric(all[[f]])
+# }
+
 # Add last month products as features to this month
 
 setkey(all, ncodpers, xf.monthnr)
@@ -105,9 +111,9 @@ setkey(all, ncodpers, xf.monthnr)
 
 for (f in productFlds) {
   all[[paste("products",f,sep=".")]] <- 
-    as.numeric(ifelse(is.na(all[[f]]) | is.na(all[[paste("xf.prev",f,sep=".")]]), 
-                      NA, 
-                      (all[[f]] == 1) & (all[[paste("xf.prev",f,sep=".")]] == 0)))
+    ifelse(is.na(all[[f]]) | is.na(all[[paste("xf.prev",f,sep=".")]]), 
+           NA, 
+           (all[[f]] == 1) & (all[[paste("xf.prev",f,sep=".")]] == 0))
 }
 
 all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
@@ -121,7 +127,7 @@ print(ggplot(filter(all, !is.na(products.newcount)),
 
 # summaries for data check
 
-for (ds in c("Test","Train")) {
+for (ds in unique(all$dataset)) {
   cat("Size of",ds,":",nrow(filter(all, dataset==ds)),fill=T)
   cat("Missing prev products in",ds,":",
       sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.products.count))),fill=T)
@@ -143,7 +149,7 @@ outcomeCols <- paste("products",productFlds,sep=".")
 trainRowz <- which(all$dataset == "Train" & !is.na(all$products.newcount))
 validateRowz <- which(all$dataset == "Validate" & !is.na(all$products.newcount))
 testRowz <- which(all$dataset == "Test")
-modelTrainFlds <- which(!startsWith(names(all), "products.") & !names(all) %in% productFlds)
+modelTrainFlds <- names(all)[which(!startsWith(names(all), "products.") & !names(all) %in% productFlds)]
 
 outcomeColsValid <- 
   sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
@@ -153,99 +159,107 @@ corrMatrix <- cor(as.matrix((all[trainRowz, outcomeCols[outcomeColsValid], with=
 corrplot(corrMatrix, type="upper",order ="AOE")
 corrplot(corrMatrix, method="number",type="upper",order ="AOE")
 
-trainMatrix <- as.matrix((all[trainRowz, modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
-validateMatrix <- as.matrix((all[validateRowz, modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
-testMatrix <- as.matrix((all[testRowz, modelTrainFlds, with=F])[,lapply(.SD,as.numeric)]) # factors/syms --> numeric
+testMatrix <- xgb.DMatrix(data.matrix(all[testRowz, modelTrainFlds, with=F]), 
+                          missing=NaN)
 
-param <- list("objective" = "binary:logistic",
+xgb.params <- list("objective" = "binary:logistic",
               max.depth = 5,
               eta = 0.01,
               "eval_metric" = "auc") # make sure to maximize!
-cv.nround <- 5
-cv.nfold <- 3
+# cv.nround <- 5
+# cv.nfold <- 3
 nround = 5
 
-results <- data.frame(ncodpers=all[dataset=="Test", ncodpers])
+testResults <- data.frame(ncodpers=all[testRowz, ncodpers])
+validateResults <- data.frame(ncodpers=all[validateRowz, ncodpers, xf.monthnr])
+
+auc.train <- list()
+auc.validate <- list()
 
 for (col in outcomeCols) {
   cat(which(col==outcomeCols),"/",length(outcomeCols),":",col,fill=T)
+
+  trainMatrix <- xgb.DMatrix(data.matrix(all[trainRowz, modelTrainFlds, with=F]), 
+                             missing=NaN, 
+                             label=all[[col]][trainRowz])
+  validateMatrix <- xgb.DMatrix(data.matrix(all[validateRowz, modelTrainFlds, with=F]), 
+                                missing=NaN, 
+                                label=all[[col]][validateRowz])
+  
   y <- as.integer(all[[col]][trainRowz])
-  yrate <- sum(y)/length(y)
-  results[[col]] <- FALSE
-  if (length(unique(y)) < 2) {
-    cat("Skipping",col,": too few distinct values,",length(unique(y)),fill=T)
-    next
+  # yrate <- sum(y)/length(y)
+  testResults[[col]] <- mean(y, na.rm = T)
+  validateResults[[col]] <- mean(y, na.rm = T)
+  auc.train[[col]] <- 0.50
+  auc.validate[[col]] <- 0.50
+  tryCatch({
+    bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
+                    watchlist=list(train=trainMatrix, validate=validateMatrix),
+                    label = as.integer(all[[col]][trainRowz]), 
+                    nrounds=nround, 
+                    maximize=T)
+    
+    # Compute & plot feature importance matrix & summary tree
+    importance_matrix <- xgb.importance(modelTrainFlds, model = bst)
+    print(xgb.plot.importance(importance_matrix)+ggtitle(paste("Feature imp for",col)))
+  
+    # xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
+    # xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
+    
+    # test on train/validation set, get some accuracy idea
+    # TODO take from XGB results
+    predictions_train <- predict(bst, trainMatrix, missing=NaN)
+    truth_train <- as.integer(all[[col]][trainRowz])
+    cat("AUC on Train:",as.numeric(auc(truth_train, predictions_train)),fill=T)
+    auc.train[[col]] <- as.numeric(auc(truth_train, predictions_train))
+    
+    predictions_validate <- predict(bst, validateMatrix, missing=NaN)
+    truth_validate <- as.integer(all[[col]][validateRowz])
+    cat("AUC on Validate:",as.numeric(auc(truth_validate, predictions_validate)),fill=T)
+    auc.validate[[col]] <- as.numeric(auc(truth_validate, predictions_validate))
+    
+    predictions <- predict(bst, testMatrix, missing=NaN)
+    print(summary(predictions))
+    testResults[[col]] <- predictions
+  
+    predictions <- predict(bst, validateMatrix, missing=NaN)
+    validateResults[[col]] <- predictions
+  }, warning = function(msg) {
+    print(msg)
+  }, error = function(msg) {
+    print(paste("XGB error:", msg))
   }
-  if (yrate < 5e-4) {
-    cat("Skipping",col,": too low rate,",yrate,fill=T)
-    next
-  }
-  # bst.cv = xgb.cv(param=param, data = trainMatrix, missing=NaN,
-  #                 label = y, 
-  #                 nfold = cv.nfold, nrounds = cv.nround, maximize=T)
-  bst = xgboost(params=param, data = trainMatrix, missing=NaN,
-                label = as.integer(all[[col]][trainRowz]), 
-                nrounds=nround, maximize=T)
-  
-  # Compute & plot feature importance matrix & summary tree
-  importance_matrix <- xgb.importance(dimnames(trainMatrix)[[2]], model = bst)
-  print(xgb.plot.importance(importance_matrix)+ggtitle(paste("Feature imp for",col)))
-
-  # xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
-  # xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
-  
-  # test on train/validation set, get some accuracy idea
-  # TODO: keep part of the "Train" set as "Validation" and use that to double check things
-  predictions_train <- predict(bst, trainMatrix, missing=NaN)
-  truth_train <- as.integer(all[[col]][trainRowz])
-  cat("AUC on Train:",as.numeric(auc(truth_train, predictions_train)),fill=T)
-  
-  predictions_validate <- predict(bst, validateMatrix, missing=NaN)
-  truth_validate <- as.integer(all[[col]][validateRowz])
-  cat("AUC on Validate:",as.numeric(auc(truth_validate, predictions_validate)),fill=T)
-  
-  # find optimal threshold to binarize the predictions
-  delta <- 0.5
-  th <- 0.5
-  target <- mean(truth_train)
-  for (itr in seq(20)) {
-    delta <- delta/2
-    preds_binarized <- (predictions_train > th)
-    current <- mean(preds_binarized)
-    # cat("Iteration",itr,"threshold",th,"target",target,"current",current,"delta",delta,fill=T)
-    if (current < target) {
-      th <- th - delta
-    } else {
-      th <- th + delta
-    }
-  }
-  predictions_train_binary <- (predictions_train > th)
-  cat("AUC on Train w threshold",th,":",
-      as.numeric(auc(truth_train, as.numeric(predictions_train_binary))),fill=T)
-
-  predictions <- predict(bst, testMatrix, missing=NaN)
-  print(summary(predictions))
-  results[[col]] <- (predictions > th)
+  )
 }
 
-# TODO keep track of the AUCs in a plot
-# all fields, before and after binarization
-# on Train and Validate
-
-# TODO look at MAPS7 evalation
-# Forum: if you want to maximize your score you should always predict seven products
-# so no thresholding, only ordering?
-# precision = TP / (TP + FP)
-
-
-
-# Concatenate names for selected products
-resultBinary <- select(results, -ncodpers)
+# Write results with concatenates names for selected products
+resultBinary <- select(testResults, -ncodpers)
 names(resultBinary) <- productFlds
-results$added_products <- apply(resultBinary, 1, function(row) { paste(productFlds[as.logical(row)],collapse=" ")})
+testResults$added_products <- apply(resultBinary, 1, function(row) { paste(productFlds[as.logical(row)],collapse=" ")})
+write.csv(select(testResults, ncodpers, added_products), "data/submission.csv",row.names = F, quote=F)
 
-write.csv(select(results, ncodpers, added_products), "data/submission.csv",row.names = F, quote=F)
+# AUC plot for individual fields
+aucplot <- as.data.frame(t(rbind(as.data.frame(auc.train), 
+                                 as.data.frame(auc.validate))))
+names(aucplot) <- c("train","validate")
+aucplot$field <- rownames(aucplot)
+aucplot <- gather(aucplot, dataset, auc, -field)
+print(ggplot(aucplot, aes(field, auc, fill=dataset))+
+  geom_bar(stat="identity",position = "dodge")+coord_flip())
 
-# subm <- fread("data/sample_submission.csv")
-# subm2 <- fread("data/submission.csv")
+# Calculate score on validation set - TODO get this much faster
+avgprecision <- 0
+for (i in 1:nrow(validateMatrix)) {
+  if (i %% 1000 == 0) { 
+    print(i) 
+    print(avgprecision/i)
+  }
+  truth <- all[validateRowz[i], outcomeCols, with=F]
+  predranks <- rank(-validateResults[i, outcomeCols], ties.method = "first") # or just - values
+  avgprecision <- avgprecision + mapk(as.logical(truth), predranks, 7)
+}
+avgprecision <- avgprecision/nrow(validateMatrix)
+cat("Average mean precision on validation set:",avgprecision,fill=T)
+
+
 
