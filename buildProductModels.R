@@ -25,7 +25,7 @@ library(scales)
 source("metrics.R")
 
 set.seed(12345)
-samplingRatio <- 0.4   # Sample ratio of full development set
+samplingRatio <- 0.2   # Sample ratio of full development set
 validationRatio <- 0.1 # Split training salmple into Train and Validate
 
 data_folder <- "data"
@@ -183,6 +183,15 @@ corrData <- data.matrix((all[,outcomeCols[outcomeColsValid], with=F]))
 corrMatrix <- cor(corrData[complete.cases(corrData),])
 corrplot(corrMatrix, method="number",type="upper",order ="AOE")
 
+testRowz <- which(all$dataset == "Test")
+testMatrix <- xgb.DMatrix(data.matrix(all[testRowz, modelTrainFlds, with=F]), 
+                          missing=NaN)
+testResults <- data.frame(ncodpers=all[testRowz, ncodpers])
+
+# For validation, rows with all outcomes defined
+validateRowz <- which(all$dataset == "Validate" & complete.cases(all[, outcomeCols, with=F]))
+validateResults <- data.frame(ncodpers=all[validateRowz, ncodpers, xf.monthnr])
+
 xgb.params <- list("objective" = "binary:logistic",
               max.depth = 5,
               eta = 0.01,
@@ -193,42 +202,33 @@ nround = 5
 auc.train <- list()
 auc.validate <- list()
 
+# good test case "change.ind_cco_fin_ult1"
+# col <- outcomeCols[3]
+
 for (col in outcomeCols) {
+  gc()
   cat(which(col==outcomeCols),"/",length(outcomeCols),":",col,fill=T)
 
-  # TODO: fix up
-  # trainRowz is the outcome rows that are not NA
-  # trainRowz is simply the outcome rows that we want to consider
-  # ie the valid ones of all[[col]]
+  trainRowz <- which(all$dataset == "Train" & !is.na(all[[col]]))
   
-  trainRowz <- which(all$dataset == "Train" & !is.na(all$change.newcount))
-  validateRowz <- which(all$dataset == "Validate" & !is.na(all$change.newcount))
-  testRowz <- which(all$dataset == "Test")
-  
+  ybase <- mean(as.integer(all[[col]][trainRowz] == "Added"))
+  testResults[[col]] <- ybase
+  validateResults[[col]] <- ybase
+  auc.train[[col]] <- 0.50
+  auc.validate[[col]] <- 0.50
   
   trainMatrix <- xgb.DMatrix(data.matrix(all[trainRowz, modelTrainFlds, with=F]), 
                              missing=NaN, 
-                             label=all[[col]][trainRowz])
+                             label=(all[[col]][trainRowz] == "Added"))
   validateMatrix <- xgb.DMatrix(data.matrix(all[validateRowz, modelTrainFlds, with=F]), 
                                 missing=NaN, 
-                                label=all[[col]][validateRowz])
-  testMatrix <- xgb.DMatrix(data.matrix(all[testRowz, modelTrainFlds, with=F]), 
-                            missing=NaN)
+                                label=(all[[col]][validateRowz] == "Added"))
   
-
-  testResults <- data.frame(ncodpers=all[testRowz, ncodpers])
-  validateResults <- data.frame(ncodpers=all[validateRowz, ncodpers, xf.monthnr])
-  
-  y <- as.integer(all[[col]][trainRowz])
-  # yrate <- sum(y)/length(y)
-  testResults[[col]] <- mean(y, na.rm = T)
-  validateResults[[col]] <- mean(y, na.rm = T)
-  auc.train[[col]] <- 0.50
-  auc.validate[[col]] <- 0.50
   tryCatch({
     bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
+                    # watchlist=list(train=trainMatrix),
                     watchlist=list(train=trainMatrix, validate=validateMatrix),
-                    label = as.integer(all[[col]][trainRowz]), 
+                    label = as.integer(all[[col]][trainRowz] == "Added"), 
                     nrounds=nround, 
                     maximize=T)
     
@@ -266,10 +266,15 @@ for (col in outcomeCols) {
 }
 
 # Write results with concatenates names for selected products
-resultBinary <- select(testResults, -ncodpers)
-names(resultBinary) <- productFlds
-testResults$added_products <- apply(resultBinary, 1, function(row) { paste(productFlds[as.logical(row)],collapse=" ")})
-write.csv(select(testResults, ncodpers, added_products), "data/submission.csv",row.names = F, quote=F)
+print("Assembling results...")
+testPropensitities <- select(testResults, -ncodpers)
+names(testPropensitities) <- productFlds
+testResults$added_products <- apply(testPropensitities, 1, 
+                                    function(row) { 
+                                      paste(names(sort(rank(-row, ties.method = "first")))[1:7], collapse=" ") })
+print("Writing submission file...")
+write.csv(select(testResults, ncodpers, added_products), 
+          "data/submission.csv",row.names = F, quote=F)
 
 # AUC plot for individual fields
 aucplot <- as.data.frame(t(rbind(as.data.frame(auc.train), 
@@ -288,8 +293,8 @@ for (i in 1:nrow(validateMatrix)) {
     print(avgprecision/i)
   }
   truth <- all[validateRowz[i], outcomeCols, with=F]
-  predranks <- rank(-validateResults[i, outcomeCols], ties.method = "first") # or just - values
-  avgprecision <- avgprecision + mapk(as.logical(truth), predranks, 7)
+  predranks <- rank(-validateResults[i, outcomeCols], ties.method = "first")
+  avgprecision <- avgprecision + mapk(truth == "Added", predranks, 7)
 }
 avgprecision <- avgprecision/nrow(validateMatrix)
 cat("Average mean precision on validation set:",avgprecision,fill=T)
