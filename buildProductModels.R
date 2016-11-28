@@ -1,3 +1,6 @@
+# Kaggle Santander 2 
+# data prep: https://www.kaggle.com/apryor6/santander-product-recommendation/detailed-cleaning-visualization/comments
+
 library(data.table)
 library(fasttime)
 library(tidyr)
@@ -22,8 +25,8 @@ library(scales)
 source("metrics.R")
 
 set.seed(12345)
-samplingRatio <- 0.1   # Sample ratio of full development set
-validationRatio <- 0.3 # Split training salmple into Train and Validate
+samplingRatio <- 0.4   # Sample ratio of full development set
+validationRatio <- 0.1 # Split training salmple into Train and Validate
 
 data_folder <- "data"
 # data_folder <- "data-unittest"
@@ -117,8 +120,8 @@ for (f in productFlds) {
            labels=c("Maintained","Added","Dropped"))
 }
 
-# TODO - fix these sums / add added/maintained/dropped seperately
-# all$xf.prev.change.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
+# TODO - consider added/maintained/dropped seperately for previous months
+all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
 # all$change.newcount <- rowSums(all[,paste("change",productFlds,sep="."),with=F])
 
 # Plot of service changes by month
@@ -152,43 +155,33 @@ print(group_by(allPrdChanges,
               feature, status) %>% summarise(n=sum(N)) %>%
         spread(status, n) %>% arrange(Added))
      
-# summaries for data check
+# summaries for data check - TODO uitvlooien
 
 for (ds in unique(all$dataset)) {
   cat("Size of",ds,":",nrow(filter(all, dataset==ds)),fill=T)
   cat("Missing prev products in",ds,":",
-      sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.change.count))),fill=T)
-  cat("Missing outcomes in",ds,":",
-      sum(is.na(filter(all, dataset==ds) %>% select(change.newcount))),fill=T)
+      sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.products.count))),fill=T)
+  # cat("Missing outcomes in",ds,":",
+  #     sum(is.na(filter(all, dataset==ds) %>% select(change.newcount))),fill=T)
   cat("First month by person for", ds, ":",
       nrow(group_by(filter(all, dataset==ds), ncodpers) %>% summarise(firstMonth = min(xf.monthnr))),fill=T)
 }
 
-# More derived features
-
-# TODO!
+# TODO More derived features
 
 # Build Models
 # Create a model for each outcome individually
 
 outcomeCols <- paste("change",productFlds,sep=".")
-
-# TODO: train/validate rowz is not static - depends on outcome col
-trainRowz <- which(all$dataset == "Train" & !is.na(all$change.newcount))
-validateRowz <- which(all$dataset == "Validate" & !is.na(all$change.newcount))
-testRowz <- which(all$dataset == "Test")
 modelTrainFlds <- names(all)[which(!startsWith(names(all), "change.") & !names(all) %in% productFlds)]
 
-outcomeColsValid <- 
-  sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
-
+# Correlation plot
 # go all out see https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html
-corrMatrix <- cor(as.matrix((all[trainRowz, outcomeCols[outcomeColsValid], with=F])))
-corrplot(corrMatrix, type="upper",order ="AOE")
+outcomeColsValid <-
+  sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
+corrData <- data.matrix((all[,outcomeCols[outcomeColsValid], with=F]))
+corrMatrix <- cor(corrData[complete.cases(corrData),])
 corrplot(corrMatrix, method="number",type="upper",order ="AOE")
-
-testMatrix <- xgb.DMatrix(data.matrix(all[testRowz, modelTrainFlds, with=F]), 
-                          missing=NaN)
 
 xgb.params <- list("objective" = "binary:logistic",
               max.depth = 5,
@@ -197,10 +190,6 @@ xgb.params <- list("objective" = "binary:logistic",
 # cv.nround <- 5
 # cv.nfold <- 3
 nround = 5
-
-testResults <- data.frame(ncodpers=all[testRowz, ncodpers])
-validateResults <- data.frame(ncodpers=all[validateRowz, ncodpers, xf.monthnr])
-
 auc.train <- list()
 auc.validate <- list()
 
@@ -209,6 +198,13 @@ for (col in outcomeCols) {
 
   # TODO: fix up
   # trainRowz is the outcome rows that are not NA
+  # trainRowz is simply the outcome rows that we want to consider
+  # ie the valid ones of all[[col]]
+  
+  trainRowz <- which(all$dataset == "Train" & !is.na(all$change.newcount))
+  validateRowz <- which(all$dataset == "Validate" & !is.na(all$change.newcount))
+  testRowz <- which(all$dataset == "Test")
+  
   
   trainMatrix <- xgb.DMatrix(data.matrix(all[trainRowz, modelTrainFlds, with=F]), 
                              missing=NaN, 
@@ -216,6 +212,12 @@ for (col in outcomeCols) {
   validateMatrix <- xgb.DMatrix(data.matrix(all[validateRowz, modelTrainFlds, with=F]), 
                                 missing=NaN, 
                                 label=all[[col]][validateRowz])
+  testMatrix <- xgb.DMatrix(data.matrix(all[testRowz, modelTrainFlds, with=F]), 
+                            missing=NaN)
+  
+
+  testResults <- data.frame(ncodpers=all[testRowz, ncodpers])
+  validateResults <- data.frame(ncodpers=all[validateRowz, ncodpers, xf.monthnr])
   
   y <- as.integer(all[[col]][trainRowz])
   # yrate <- sum(y)/length(y)
