@@ -1,6 +1,10 @@
 # Kaggle Santander 2 
 # data prep: https://www.kaggle.com/apryor6/santander-product-recommendation/detailed-cleaning-visualization/comments
 
+# data is cplx https://www.kaggle.com/sudalairajkumar/santander-product-recommendation/when-less-is-more/code
+# https://www.kaggle.com/c/santander-product-recommendation/forums/t/25579/when-less-is-more
+# https://www.kaggle.com/alexeylive/santander-product-recommendation/june-2015-customers/run/468128
+
 library(data.table)
 library(fasttime)
 library(tidyr)
@@ -24,9 +28,11 @@ library(scales)
 
 source("metrics.R")
 
+# with 0.4 sample 0.0044671 vs 0.018294 before on 0.2 - is this just random?
+
 set.seed(12345)
-samplingRatio <- 0.2   # Sample ratio of full development set
-validationRatio <- 0.1 # Split training salmple into Train and Validate
+samplingRatio <- 0.4   # Sample ratio of full development set
+validationRatio <- 0.1 # Split training sample into Train and Validate
 
 data_folder <- "data"
 # data_folder <- "data-unittest"
@@ -34,30 +40,34 @@ data_folder <- "data"
 # Read data
 data_colClasses = list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
 data_dateFlds = c("fecha_dato","fecha_alta","ult_fec_cli_1t")
-
+trainDates <- c('2015-05-28', '2015-06-28')
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), 
                colClasses = data_colClasses)
+train <- train[fecha_dato %in% trainDates,]
+# only keep rows that have persons at both dates
+train[, nMonth := rep(.N,.N) ,by=ncodpers]
+train <- train[nMonth == length(trainDates),]
+train[,nMonth := NULL]
 
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
-# Sample to speed up development, then split into Train/Validate
-
 allPersonz <- unique(train$ncodpers)
-cat("Before dev sampling train size:", dim(train), "unique persons:",length(allPersonz),fill = T)
-if (nrow(train) > 1000000) {
-  train <- train[ncodpers %in% sample(allPersonz, trunc(samplingRatio*length(allPersonz))),]
-}
-allPersonz <- unique(train$ncodpers)
-cat("After dev sampling train size:", dim(train), "unique persons:",length(allPersonz),fill = T)
-rm(allPersonz)
+cat("Sampling train size:", dim(train), "; unique persons:",length(allPersonz),fill = T)
 
-test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), 
+test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), # fecha_dato is "2016-06-28" for all
               colClasses = data_colClasses)
 
 # Concatenate both into one set makes it a lot easier to do all the 
 # data processing and generation of derived fields.
+# train/val not done properly!
+sampling <- data.table(ncodpers = allPersonz,
+                       dataset = sample(c("Train","Validate"),length(allPersonz),replace=T,prob=c(1-validationRatio,validationRatio)))
+setkey(train, ncodpers)
+setkey(sampling, ncodpers)
+train <- train[sampling]
+test$dataset <- "Test"
 all <- bind_rows(train, test)
-all$dataset <- c(sample(c("Train","Validate"),nrow(train),replace=T,prob=c(1-validationRatio,validationRatio)), rep("Test", nrow(test)))
+
 rm(list=c("train","test"))
 print(ggplot(group_by(all, dataset) %>% summarise(n = n(), pct = n()/nrow(all)), 
        aes(dataset,pct,label=n,fill=dataset))+
@@ -67,7 +77,7 @@ print(ggplot(group_by(all, dataset) %>% summarise(n = n(), pct = n()/nrow(all)),
 
 interactionFreqs <- group_by(all, ncodpers, dataset) %>% summarise(n=n())
 print(ggplot(interactionFreqs, aes(n, fill=dataset))+geom_bar()+
-        ggtitle("Number of purchases per Person"))
+        ggtitle("How often the same persons occur"))
 
 # Dates
 
@@ -77,6 +87,7 @@ for(f in intersect(data_dateFlds, names(all))) {
   all[[paste("xf.month",f,sep=".")]] <- month(all[[f]])
 }
 all$xf.monthnr <- all$xf.year.fecha_dato*12 + all$xf.month.fecha_dato - 1
+
 # TODO also date differences between all pairs of date fields
 # use is.POSIXct(all$fecha_alta) to traverse the date fields
 
@@ -104,84 +115,113 @@ for (f in names(all)[sapply(all, class) == "character"]) {
 
 setkey(all, ncodpers, xf.monthnr)
 lastMonthProducts <- all[,c("ncodpers","xf.monthnr",productFlds),with=F]
-lastMonthProducts$xf.monthnr <- lastMonthProducts$xf.monthnr+1
+lastMonthProducts$xf.monthnr <- lastMonthProducts$xf.monthnr+1 # is really target month nr
 names(lastMonthProducts)[2+seq(length(productFlds))] <- paste("xf.prev",productFlds,sep=".")
 setkey(lastMonthProducts, ncodpers, xf.monthnr)
 all <- lastMonthProducts[all]
 setkey(all, ncodpers, xf.monthnr)
 
+#table(all$xf.monthnr)
+
 # Set outcome as the products newly purchased in the current month
 for (f in productFlds) {
   all[[paste("change",f,sep=".")]] <-
-    # all[[f]] - all[[paste("xf.prev",f,sep=".")]]
-
-  factor(all[[f]] - all[[paste("xf.prev",f,sep=".")]],
-           levels=c(NA,0,1,-1),
-           labels=c("Maintained","Added","Dropped"))
+    all[[f]] - all[[paste("xf.prev",f,sep=".")]]
+  # factor(all[[f]] - all[[paste("xf.prev",f,sep=".")]],
+  #          levels=c(NA,0,1,-1),
+  #          labels=c("Maintained","Added","Dropped"))
 }
 
+allMelted <- melt(all, 
+                  id.vars = setdiff(names(all),paste("change",productFlds,sep=".")),
+                  measure.vars = paste("change",productFlds,sep="."),
+                  variable.name = "product",
+                  value.name = "action"
+                  )
+allMelted <- allMelted[action == 1 | dataset == "Test",] # all NA in test set
+allMelted[,action := NULL]
+cat("Unique persons in train set that made a purchase:",length(unique(allMelted[dataset=="Train",ncodpers])),fill=T)
+
 # TODO - consider added/maintained/dropped seperately for previous months
-all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
+#all$xf.prev.products.count <- rowSums(all[,paste("xf.prev",productFlds,sep="."),with=F])
 # all$change.newcount <- rowSums(all[,paste("change",productFlds,sep="."),with=F])
 
 # Plot of service changes by month
 # see https://www.kaggle.com/apryor6/santander-product-recommendation/detailed-cleaning-visualization/comments
-monthVar <- "xf.month.fecha_dato"
-allPrdChanges <- NULL
-for (f in productFlds) {
-  tmp <- all[, .N,by=c(paste("change",f,sep="."),monthVar)]
-  names(tmp)[1] <- "status"
-  names(tmp)[2] <- "month"
-  tmp$feature <- f
-  if (is.null(allPrdChanges)) { 
-    allPrdChanges <- tmp
-  } else {
-    allPrdChanges <- rbind(allPrdChanges, tmp)
-  }
-}
-# add 0's for those that only have NA or Maintained
-allPrdChanges <- spread(allPrdChanges, status, N, fill=0) %>% gather(status, N, -month,-feature)
-print(ggplot(filter(allPrdChanges, !is.na(status) & status != "Maintained" & status != "<NA>"), 
-       aes(y=N,x=factor(month.abb[month],levels=month.abb[seq(12,1,-1)])))+
-  geom_bar(aes(fill=status),stat="identity")+
-  facet_wrap(facets=~feature,ncol=6)+
-  coord_flip() + ylab("Count") + xlab("") + ggtitle("Service Changes by Month") +
-  scale_fill_manual(values=c("cyan","magenta"))+
-  theme_dark() +
-  theme(axis.text =element_text(size=8),
-        axis.text.x = element_text(angle = 45, hjust = 1)))
-
-print(group_by(allPrdChanges, 
-              feature, status) %>% summarise(n=sum(N)) %>%
-        spread(status, n) %>% arrange(Added))
+# monthVar <- "xf.month.fecha_dato"
+# allPrdChanges <- NULL
+# for (f in productFlds) {
+#   tmp <- all[, .N,by=c(paste("change",f,sep="."),monthVar)]
+#   names(tmp)[1] <- "status"
+#   names(tmp)[2] <- "month"
+#   tmp$feature <- f
+#   if (is.null(allPrdChanges)) { 
+#     allPrdChanges <- tmp
+#   } else {
+#     allPrdChanges <- rbind(allPrdChanges, tmp)
+#   }
+# }
+# # add 0's for those that only have NA or Maintained
+# allPrdChanges <- spread(allPrdChanges, status, N, fill=0) %>% gather(status, N, -month,-feature)
+# print(ggplot(filter(allPrdChanges, !is.na(status) & status != "Maintained" & status != "<NA>"), 
+#        aes(y=N,x=factor(month.abb[month],levels=month.abb[seq(12,1,-1)])))+
+#   geom_bar(aes(fill=status),stat="identity")+
+#   facet_wrap(facets=~feature,ncol=6)+
+#   coord_flip() + ylab("Count") + xlab("") + ggtitle("Service Changes by Month") +
+#   scale_fill_manual(values=c("cyan","magenta"))+
+#   theme_dark() +
+#   theme(axis.text =element_text(size=8),
+#         axis.text.x = element_text(angle = 45, hjust = 1)))
+# 
+# print(group_by(allPrdChanges, 
+#               feature, status) %>% summarise(n=sum(N)) %>%
+#         spread(status, n) %>% arrange(Added))
      
 # summaries for data check - TODO uitvlooien
 
-for (ds in unique(all$dataset)) {
-  cat("Size of",ds,":",nrow(filter(all, dataset==ds)),fill=T)
-  cat("Missing prev products in",ds,":",
-      sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.products.count))),fill=T)
-  # cat("Missing outcomes in",ds,":",
-  #     sum(is.na(filter(all, dataset==ds) %>% select(change.newcount))),fill=T)
-  cat("First month by person for", ds, ":",
-      nrow(group_by(filter(all, dataset==ds), ncodpers) %>% summarise(firstMonth = min(xf.monthnr))),fill=T)
-}
+# for (ds in unique(all$dataset)) {
+#   cat("Size of",ds,":",nrow(filter(all, dataset==ds)),fill=T)
+#   cat("Missing prev products in",ds,":",
+#       sum(is.na(filter(all, dataset==ds) %>% select(xf.prev.products.count))),fill=T)
+#   # cat("Missing outcomes in",ds,":",
+#   #     sum(is.na(filter(all, dataset==ds) %>% select(change.newcount))),fill=T)
+#   cat("First month by person for", ds, ":",
+#       nrow(group_by(filter(all, dataset==ds), ncodpers) %>% summarise(firstMonth = min(xf.monthnr))),fill=T)
+# }
 
 # TODO More derived features
 
-# Build Models
+# Build multiclass model
+xgb.params <- list("objective" = "multi:softprob",
+                   max.depth = 5,
+                   num_class = 1+length(productFlds), # factor starts at 1
+                   eta = 0.01)
+
+modelTrainFlds <- names(allMelted)[which(!names(allMelted) %in% c("product",productFlds))]
+trainMatrix <- xgb.DMatrix(data.matrix(allMelted[dataset == "Train", modelTrainFlds, with=F]), 
+                           missing=NaN, 
+                           label=as.integer(allMelted$product[allMelted$dataset == "Train"]))
+
+bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
+                watchlist=list(train=trainMatrix),
+                #watchlist=list(train=trainMatrix, validate=validateMatrix),
+                #label = as.integer(all[[col]][trainRowz] == "Added"), 
+                nrounds=10, 
+                maximize=F)
+
+
+
 # Create a model for each outcome individually
 
 outcomeCols <- paste("change",productFlds,sep=".")
-modelTrainFlds <- names(all)[which(!startsWith(names(all), "change.") & !names(all) %in% productFlds)]
 
 # Correlation plot
 # go all out see https://cran.r-project.org/web/packages/corrplot/vignettes/corrplot-intro.html
-outcomeColsValid <-
-  sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
-corrData <- data.matrix((all[,outcomeCols[outcomeColsValid], with=F]))
-corrMatrix <- cor(corrData[complete.cases(corrData),])
-corrplot(corrMatrix, method="number",type="upper",order ="AOE")
+# outcomeColsValid <-
+#   sapply(outcomeCols, function(fld) {sum(!is.na(unique(all[[fld]])))} > 1)
+# corrData <- data.matrix((all[,outcomeCols[outcomeColsValid], with=F]))
+# corrMatrix <- cor(corrData[complete.cases(corrData),])
+# corrplot(corrMatrix, method="number",type="upper",order ="AOE")
 
 testRowz <- which(all$dataset == "Test")
 testMatrix <- xgb.DMatrix(data.matrix(all[testRowz, modelTrainFlds, with=F]), 
@@ -218,9 +258,6 @@ for (col in rev(outcomeCols)) {
   auc.train[[col]] <- 0.50
   auc.validate[[col]] <- 0.50
   
-  trainMatrix <- xgb.DMatrix(data.matrix(all[trainRowz, modelTrainFlds, with=F]), 
-                             missing=NaN, 
-                             label=(all[[col]][trainRowz] == "Added"))
   validateMatrix <- xgb.DMatrix(data.matrix(all[validateRowz, modelTrainFlds, with=F]), 
                                 missing=NaN, 
                                 label=(all[[col]][validateRowz] == "Added"))
@@ -299,6 +336,16 @@ for (i in 1:nrow(validateMatrix)) {
 }
 avgprecision <- avgprecision/nrow(validateMatrix)
 cat("Average mean precision on validation set:",avgprecision,fill=T)
+
+stop("pruts")
+
+dt <- data.table(pers = rep(letters[1:3],3),
+                 month = (1:9-1) %/% 3 + 1,
+                 purch = 1:9 %% 2)
+dt[, nmonth := 1+month, by = .(pers)]
+dt[, sump := c(cumsum(purch[1:2]),NA), by = .(pers)]
+print(arrange(dt, pers))
+# group_by(dt, pers) %>% summarise(np = sum(purch))
 
 
 
