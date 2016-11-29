@@ -205,7 +205,8 @@ auc.validate <- list()
 # good test case "change.ind_cco_fin_ult1"
 # col <- outcomeCols[3]
 
-for (col in outcomeCols) {
+# TODO: sort by dependencies, use previous outcome(s) in next prediction
+for (col in rev(outcomeCols)) {
   gc()
   cat(which(col==outcomeCols),"/",length(outcomeCols),":",col,fill=T)
 
