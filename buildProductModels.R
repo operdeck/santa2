@@ -38,8 +38,6 @@ data_folder <- "data"
 # data_folder <- "data-unittest"
 
 # Read data
-data_colClasses = list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
-data_dateFlds = c("fecha_dato","fecha_alta","ult_fec_cli_1t")
 trainDates <- c('2015-05-28', '2015-06-28')
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), 
                colClasses = data_colClasses)
