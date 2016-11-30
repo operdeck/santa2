@@ -45,6 +45,9 @@ train <- fread(paste(data_folder,"train_ver2.csv",sep="/"),
                colClasses = data_colClasses)
 train <- train[fecha_dato %in% trainDates,]
 # only keep rows that have persons at both dates
+# probably not... logic is different...
+# target D --> N months before
+# same for test set
 train[, nMonth := rep(.N,.N) ,by=ncodpers]
 train <- train[nMonth == length(trainDates),]
 train[,nMonth := NULL]
@@ -201,15 +204,26 @@ modelTrainFlds <- names(allMelted)[which(!names(allMelted) %in% c("product",prod
 trainMatrix <- xgb.DMatrix(data.matrix(allMelted[dataset == "Train", modelTrainFlds, with=F]), 
                            missing=NaN, 
                            label=as.integer(allMelted$product[allMelted$dataset == "Train"]))
+validateMatrix <- xgb.DMatrix(data.matrix(allMelted[dataset == "Validate", modelTrainFlds, with=F]), 
+                           missing=NaN, 
+                           label=as.integer(allMelted$product[allMelted$dataset == "Validate"]))
 
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
-                watchlist=list(train=trainMatrix),
-                #watchlist=list(train=trainMatrix, validate=validateMatrix),
+                #watchlist=list(train=trainMatrix),
+                watchlist=list(train=trainMatrix, validate=validateMatrix),
                 #label = as.integer(all[[col]][trainRowz] == "Added"), 
                 nrounds=10, 
                 maximize=F)
 
+# Compute & plot feature importance matrix & summary tree
+importance_matrix <- xgb.importance(modelTrainFlds, model = bst)
+print(xgb.plot.importance(importance_matrix))
 
+# xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
+# xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
+
+stop("Now apply somehow")
+stop("Train needs prior month as well - for prev.ind, perhaps more")
 
 # Create a model for each outcome individually
 
