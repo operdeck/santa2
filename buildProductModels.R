@@ -9,34 +9,22 @@
 source("santa2.R")
 source("metrics.R")
 
-validationRatio <- 0.1 # Split training sample into Train and Validate
-
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
-train <- train[fecha_dato %in% trainDates,]
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
+
+# set aside outcomes of 1 month before test set
+testPrevPortfolio <- train[fecha_dato == testDatePrev, 
+                           c("fecha_dato", "ncodpers", productFlds), with=F]
+testPrevPortfolio$fecha_dato <- toMonthNr(testPrevPortfolio$fecha_dato)
+
+# TODO : for validation run this whole thing predicting e.g. '2016-05-28' from '2015-05-28'
+
+# Only keep the records we need for the prediction dates
+train <- train[fecha_dato %in% trainDates,]
 
 allPersonz <- unique(train$ncodpers)
 cat("Train size:", dim(train), "; unique persons:",length(allPersonz),fill = T)
-
-# Split train/validation by persons
-
-split <- data.table(ncodpers = allPersonz,
-                    dataset = sample(c("Train","Validate"),length(allPersonz),replace=T,prob=c(1-validationRatio,validationRatio)))
-setkey(train, ncodpers)
-setkey(split, ncodpers)
-train <- train[split]
-
-# Concatenate both into one set makes it a lot easier to do all the 
-# data processing and generation of derived fields.
-# train/val not done properly!
-# test$dataset <- "Test"
-# all <- bind_rows(train, test)
-# rm(list=c("train","test"))
-
-print(ggplot(group_by(train, dataset) %>% summarise(n = n(), pct = n()/nrow(train)), 
-       aes(dataset,pct,label=n,fill=dataset))+
-  geom_bar(stat="identity")+geom_text()+scale_y_continuous(labels=percent)+ggtitle("Data set splits"))
 
 # Dates
 
@@ -128,12 +116,14 @@ modelTrainFlds <- names(train)[which(!names(train) %in% c("product","dataset",pr
 trainMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Train", modelTrainFlds, with=F]), 
                            missing=NaN, 
                            label=as.integer(train$product[train$dataset == "Train"])-1)
-validateMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Validate", modelTrainFlds, with=F]), 
-                           missing=NaN, 
-                           label=as.integer(train$product[train$dataset == "Validate"])-1)
+
+xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
+       nrounds=50, 
+       nfold=5,
+       maximize=F)
 
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
-                watchlist=list(train=trainMatrix, validate=validateMatrix),
+                watchlist=list(train=trainMatrix),
                 nrounds=500, 
                 maximize=F)
 
@@ -145,32 +135,25 @@ print(xgb.plot.importance(importance_matrix))
 # xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
 # xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
 
-print("Test/Validate predictions...")
-xgbpred <- predict(bst, validateMatrix, missing=NaN)
-validateProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=sum(train$dataset == "Validate")))
-colnames(validateProbabilities) <- productFlds
-
+print("Test predictions...")
 testMatrix <- xgb.DMatrix(data.matrix(test[, modelTrainFlds, with=F]), missing=NaN)
 xgbpred <- predict(bst, testMatrix, missing=NaN)
 testProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=nrow(test)))
 colnames(testProbabilities) <- productFlds
 
+# Force probabilities to 0 for products already in portfolio of previous month
+portfolioMultipliers <- test[, "ncodpers", with=F]
+portfolioMultipliers <- left_join(portfolioMultipliers, (1-testPrevPortfolio), by="ncodpers") %>% select(-ncodpers, -fecha_dato)
+testProbabilities <- testProbabilities * portfolioMultipliers
+
 # Viz distributions together with the earlier ones from the actual data
-print("Test/Validate distributions")
+print("Test distributions")
 testDistrib <- data.frame(
   product   = productFlds,
   additions = rowSums(apply(-testProbabilities, 1, rank, ties.method = "first") <= 7),
   dataset   = "Test Predictions")
 testDistrib$dataset.total <- sum(testDistrib$additions) 
 testDistrib$additions.rel <- testDistrib$additions/testDistrib$dataset.total 
-
-validateDistrib <- data.frame(
-  product   = productFlds,
-  additions = rowSums(apply(-validateProbabilities, 1, rank, ties.method = "first") <= 7),
-  dataset   = "Validate Predictions")
-validateDistrib$dataset.total <- sum(validateDistrib$additions) 
-validateDistrib$additions.rel <- validateDistrib$additions/validateDistrib$dataset.total 
-productDistributions <- rbindlist(list(productDistributions, testDistrib, validateDistrib), use.names = T, fill=T)
 
 print(ggplot(productDistributions, 
              aes(factor(product, levels=unique(arrange(productDistributions,additions.rel)$product)),additions.rel,fill=dataset))+
@@ -179,6 +162,7 @@ print(ggplot(productDistributions,
         xlab("product")+ylab("Added"))
 
 print("Assembling results...")
+# TODO use testPrevPortfolio to set props to 0 for things already in portfolio
 testResults <- data.frame(ncodpers = test[, ncodpers])
 testResults$added_products <- apply(testProbabilities, 1, 
                                     function(row) { 
@@ -187,29 +171,32 @@ print("Writing submission file...")
 write.csv(testResults, "data/newsubmission.csv",row.names = F, quote=F)
 
 # Get validation set back into original 'wide' format
-validationTruth <- spread(mutate(train[dataset == "Validate", 
-                     c("fecha_dato","ncodpers","product"), with=F], value=1),
-       product, value, fill=0)
-for (f in setdiff(productFlds,names(validationTruth))) {
-  validationTruth[[f]] <- 0
-}
-validationTruth <- validationTruth[, c("fecha_dato","ncodpers", productFlds)]
-
-# Get validation predictions but remove the duplicates (these happened because the 
-# data was melted to long format)
-validationWideRowz <- which( !duplicated(data.matrix(train[dataset == "Validate", c("fecha_dato","ncodpers"), with=F])) )
-validationPredicitons <- validateProbabilities[validationWideRowz,productFlds]
-
-# Calculate score on validation set - TODO get this much faster
-avgprecision <- 0
-for (i in 1:nrow(validationTruth)) {
-  truth <- validationTruth[i,productFlds]
-  predranks <- rank(-validationPredicitons[i, productFlds], ties.method = "first")
-  avgprecision <- avgprecision + mapk(truth == 1, predranks, 7)
-}
-avgprecision <- avgprecision/nrow(validationTruth)
-cat("Average mean precision on validation set:",avgprecision,fill=T)
+# validationTruth <- spread(mutate(train[dataset == "Validate", 
+#                      c("fecha_dato","ncodpers","product"), with=F], value=1),
+#        product, value, fill=0)
+# for (f in setdiff(productFlds,names(validationTruth))) {
+#   validationTruth[[f]] <- 0
+# }
+# validationTruth <- validationTruth[, c("fecha_dato","ncodpers", productFlds)]
+# 
+# # Get validation predictions but remove the duplicates (these happened because the 
+# # data was melted to long format)
+# validationWideRowz <- which( !duplicated(data.matrix(train[dataset == "Validate", c("fecha_dato","ncodpers"), with=F])) )
+# validationPredicitons <- validateProbabilities[validationWideRowz,productFlds]
+# 
+# # Calculate score on validation set
+# avgprecision <- 0
+# for (i in 1:nrow(validationTruth)) {
+#   truth <- as.numeric(validationTruth[i, productFlds])==1
+#   names(truth) <- productFlds
+#   predranks <- rank(-validationPredicitons[i, productFlds], ties.method = "first")
+#   # print(mapk(truth == 1, predranks, 7))
+#   avgprecision <- avgprecision + mapk(truth, predranks, 7)
+# }
+# avgprecision <- avgprecision/nrow(validationTruth)
+# cat("Average mean precision on validation set:",avgprecision,fill=T)
 
 
 zip("data/newsubmission.csv.zip","data/newsubmission.csv")
+
 

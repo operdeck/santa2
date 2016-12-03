@@ -12,12 +12,14 @@ mapk <- function(truth, predranks, k=length(predranks)) {
   # cat("Preds: ", letters[1:max(predranks)][predranks], fill=T) 
   
   # map_nom <- (truth[predranks]*cumsum(truth[predranks]))[1:k]
-  map_nom <- (cumsum(truth[predranks]))[1:k]
+  # map_nom <- (cumsum(truth[predranks]))[1:k]
+  topK <- truth[names(predranks)[predranks <= k]]
+  map_nom <- topK*cumsum(topK)
   
   # cat("MAP nominator:", map_nom, fill=T)
   # cat("MAP denominator:", idxs, fill=T)
   
-  result <- mean(map_nom/idxs)
+  result <- mean(map_nom/idxs, na.rm = T)
   # cat("MAP = mean of",map_nom/idxs, "=",result,fill=T)
   
   return(result)
