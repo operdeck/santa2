@@ -5,6 +5,8 @@
 # https://www.kaggle.com/c/santander-product-recommendation/forums/t/25579/when-less-is-more
 # https://www.kaggle.com/alexeylive/santander-product-recommendation/june-2015-customers/run/468128
 
+# TODO mini version with just a-priori probabilities...
+# TODO high cardinality categoricals to nrs
 
 source("santa2.R")
 source("metrics.R")
@@ -40,7 +42,7 @@ for(i in 1:ncol(dateCombos)) {
 
 # Categorical
 
-for (f in setdiff(names(train)[sapply(train, class) == "character"], c("dataset"))) {
+for (f in names(train)[sapply(train, class) == "character"]) {
   cat("Transforming categorical field",f,fill=T)
   lvls <- unique(unique(train[[f]]),unique(test[[f]]))
   train[[f]] <- factor(train[[f]], levels = lvls)
@@ -80,19 +82,18 @@ train$action <- NULL
 cat("Train size after melting:", dim(train), "; unique persons:",length(unique(train$ncodpers)),fill = T)
 
 productDistributions <-
-  group_by(train, product, dataset) %>%
+  group_by(train, product) %>%
   summarise(additions = n()) %>%
-  left_join(group_by(train, dataset) %>% summarise(dataset.total = n()), by="dataset") %>%
-  mutate(additions.rel = additions/dataset.total) %>% 
+  mutate(additions.rel = additions/nrow(train)) %>% 
   arrange(additions.rel)
 
 print(ggplot(productDistributions, 
-       aes(factor(product, levels=unique(productDistributions$product)),additions.rel,fill=dataset))+
+       aes(factor(product, levels=unique(productDistributions$product)),additions.rel))+
   geom_bar(stat="identity",position="dodge")+coord_flip()+
   scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
     xlab("product")+ylab("Added"))
 
-cat("Unique customers in train set that made a purchase:",length(unique(train[dataset=="Train",ncodpers])),fill=T)
+cat("Unique customers in train set that made a purchase:",length(unique(train[,ncodpers])),fill=T)
 
 # Join in extra fields
 aggregates <- fread(paste(data_folder,"interactionAggregates.csv",sep="/"))
@@ -105,26 +106,26 @@ test <- merge(test, aggregates, all.x=TRUE)
 # Build multiclass model
 xgb.params <- list(objective = "multi:softprob",
                    eval_metric = "mlogloss", # i really want "map@7" but get errors
-                   max.depth = 5,
+                   max.depth = 7,
                    num_class = length(productFlds),
                    eta = 0.01)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
 
-modelTrainFlds <- names(train)[which(!names(train) %in% c("product","dataset",productFlds))]
-trainMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Train", modelTrainFlds, with=F]), 
+modelTrainFlds <- names(train)[which(!names(train) %in% c("product",productFlds))]
+trainMatrix <- xgb.DMatrix(data.matrix(train[, modelTrainFlds, with=F]), 
                            missing=NaN, 
-                           label=as.integer(train$product[train$dataset == "Train"])-1)
+                           label=as.integer(train$product)-1)
 
-xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
-       nrounds=50, 
-       nfold=5,
-       maximize=F)
+# xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
+#        nrounds=50, 
+#        nfold=5,
+#        maximize=F)
 
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
                 watchlist=list(train=trainMatrix),
-                nrounds=500, 
+                nrounds=1000, 
                 maximize=F)
 
 # Compute & plot feature importance matrix & summary tree
@@ -144,16 +145,19 @@ colnames(testProbabilities) <- productFlds
 # Force probabilities to 0 for products already in portfolio of previous month
 portfolioMultipliers <- test[, "ncodpers", with=F]
 portfolioMultipliers <- left_join(portfolioMultipliers, (1-testPrevPortfolio), by="ncodpers") %>% select(-ncodpers, -fecha_dato)
-testProbabilities <- testProbabilities * portfolioMultipliers
+# testProbabilities <- testProbabilities * portfolioMultipliers
+# with multiply: 0.0279001, without: 0.0279001. Really? 
 
 # Viz distributions together with the earlier ones from the actual data
 print("Test distributions")
+productDistributions$dataset <- "Train"
 testDistrib <- data.frame(
   product   = productFlds,
   additions = rowSums(apply(-testProbabilities, 1, rank, ties.method = "first") <= 7),
   dataset   = "Test Predictions")
 testDistrib$dataset.total <- sum(testDistrib$additions) 
 testDistrib$additions.rel <- testDistrib$additions/testDistrib$dataset.total 
+productDistributions <- rbindlist(list(productDistributions, testDistrib), use.names = T, fill=T)
 
 print(ggplot(productDistributions, 
              aes(factor(product, levels=unique(arrange(productDistributions,additions.rel)$product)),additions.rel,fill=dataset))+
