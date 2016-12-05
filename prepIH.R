@@ -15,10 +15,10 @@ setkey(train, fecha_dato, ncodpers)
 # Aggregate: last month portfolio and size of portfolio
 interactionAggregates <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-1), ]
 interactionAggregates$fecha_dato <- interactionAggregates$fecha_dato+1
-interactionAggregates[ , lastmonth.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
-setnames(interactionAggregates, productFlds, paste("lastmonth",productFlds,sep="."))
+interactionAggregates[ , portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
+setnames(interactionAggregates, productFlds, paste("portfolio",productFlds,sep="."))
 
-print(ggplot(interactionAggregates, aes(factor(lastmonth.portfolio.size), fill=factor(fecha_dato)))+
+print(ggplot(interactionAggregates, aes(factor(portfolio.size), fill=factor(fecha_dato)))+
         geom_bar()+ggtitle("Last month portfolio size for target dates"))
 
 print(unique(train$fecha_dato))
@@ -45,7 +45,7 @@ for (f in productFlds) {
 print("Row sums of number of additions etc")
 train[ , n.additions := rowSums(.SD == 1, na.rm=T), .SDcols = productFlds]
 train[ , n.removals  := rowSums(.SD == -1, na.rm=T), .SDcols = productFlds]
-train[ , n.change    := rowSums(.SD != 0, na.rm=T), .SDcols = productFlds]
+train[ , n.changes    := rowSums(.SD != 0, na.rm=T), .SDcols = productFlds]
 
 # Aggregate: number of additions etc across all products in the last N months
 setkey(interactionAggregates, fecha_dato, ncodpers)
@@ -55,15 +55,27 @@ for (h in 1:maxHistoryWindow) {
   # NB could be faster if needed
   # other aggregates here as well?
   tmp <- rbind(train[ fecha_dato >= (trainDateNr-h) & fecha_dato <= (trainDateNr-1), 
-                      list(fecha_dato = trainDateNr, n.additions = sum(n.additions, na.rm=T), n.removals = sum(n.removals, na.rm=T), n.changes = sum(n.change, na.rm=T)), by=ncodpers ],
+                      list(fecha_dato = trainDateNr, n.additions = sum(n.additions, na.rm=T), n.removals = sum(n.removals, na.rm=T), n.changes = sum(n.changes, na.rm=T)), by=ncodpers ],
                train[ fecha_dato >= (testDateNr-h) & fecha_dato <= (testDateNr-1), 
-                      list(fecha_dato = testDateNr, n.additions = sum(n.additions, na.rm=T), n.removals = sum(n.removals, na.rm=T), n.changes = sum(n.change, na.rm=T)), by=ncodpers ])
+                      list(fecha_dato = testDateNr, n.additions = sum(n.additions, na.rm=T), n.removals = sum(n.removals, na.rm=T), n.changes = sum(n.changes, na.rm=T)), by=ncodpers ])
   
   setnames(tmp, names(tmp)[3:length(names(tmp))], paste(names(tmp)[3:length(names(tmp))], ".M", h, sep=""))
   setkey(tmp, fecha_dato, ncodpers)
   
   interactionAggregates <- merge(interactionAggregates, tmp, all.x=TRUE)
 }
+
+# Global nr of additions etc over whole period by person
+totalsByPerson <- data.table(group_by(train, ncodpers) %>%
+  summarise(total.person.additions = sum(n.additions, na.rm=T),
+            total.person.removals = sum(n.removals, na.rm=T),
+            total.person.changes = sum(n.changes, na.rm=T)))
+setkey(totalsByPerson, ncodpers)
+interactionAggregates <- merge(interactionAggregates, totalsByPerson, all.x=TRUE)
+
+# TODO: consider a PCA or clustering of persons
+
+
 
 write.csv(interactionAggregates, paste(data_folder,"interactionAggregates.csv",sep="/"), row.names = F)
 

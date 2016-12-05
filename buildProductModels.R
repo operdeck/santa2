@@ -15,6 +15,43 @@ train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_co
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
+# Add derived field with nr of distincts - before we truncate the train set to just certain dates
+# TODO potentially use test set as well
+
+for (f in intersect(setdiff(names(train), c(productFlds,data_dateFlds,"ncodpers")), 
+                    names(train)[sapply(train, class)=="character"])) {
+  print(f)
+  if (F & length(unique(train[[f]])) > 20) {
+    cat("Transforming high cardinality field to frequencies",f,class(f),fill=T)
+    highCardinalityFieldSummary <- 
+      data.table(rbindlist(list(data.frame(group_by_(train, f) %>% summarise(freq = n()), stringsAsFactors = F),
+                                data.frame(group_by_(test, f) %>% summarise(freq = n()), stringsAsFactors = F)),
+                use.names = T) %>% group_by_(f) %>% summarise(freq = sum(freq, na.rm=T)) %>%
+      arrange(desc(freq)))
+    # Create hot-one encoding for the top-3
+    for (topN in 1:3) {
+      highCardinalityFieldSummary[[paste("is",f,make.names(as.character(highCardinalityFieldSummary[[1]][topN])),sep=".")]] <- 
+        c(rep(FALSE, topN-1), TRUE, rep(FALSE, nrow(highCardinalityFieldSummary)-topN))
+    }
+    setnames(highCardinalityFieldSummary, "freq", paste("freq",f,sep="."))
+    setkeyv(train, f)
+    setkeyv(test, f)
+    setkeyv(highCardinalityFieldSummary, f)
+    train <- merge(train, highCardinalityFieldSummary, all.x=TRUE)
+    test <- merge(test, highCardinalityFieldSummary, all.x=TRUE)
+
+    train[[f]] <- NULL
+    test[[f]] <- NULL
+  } else {
+    cat("Transforming categorical field to factor levels",f,fill=T)
+    lvls <- unique(unique(train[[f]]),unique(test[[f]]))
+    train[[f]] <- factor(train[[f]], levels = lvls)
+    test[[f]] <- factor(test[[f]], levels = lvls)
+  }
+}
+
+# TODO: data cleaning (Age etc)
+
 # set aside outcomes of 1 month before test set
 testPrevPortfolio <- train[fecha_dato == testDatePrev, 
                            c("fecha_dato", "ncodpers", productFlds), with=F]
@@ -36,25 +73,27 @@ for(f in intersect(data_dateFlds, names(train))) {
 }
 dateCombos <- combn(intersect(data_dateFlds, names(train)),2)
 for(i in 1:ncol(dateCombos)) {
-  train[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- train[[dateCombos[1,i]]] - train[[dateCombos[2,i]]]
-  test[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- test[[dateCombos[1,i]]] - test[[dateCombos[2,i]]]
+  train[[ paste("dates",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- train[[dateCombos[1,i]]] - train[[dateCombos[2,i]]]
+  test[[ paste("dates",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- test[[dateCombos[1,i]]] - test[[dateCombos[2,i]]]
 }
 
 # Categorical
 
-for (f in names(train)[sapply(train, class) == "character"]) {
-  cat("Transforming categorical field",f,fill=T)
-  lvls <- unique(unique(train[[f]]),unique(test[[f]]))
-  train[[f]] <- factor(train[[f]], levels = lvls)
-  test[[f]] <- factor(test[[f]], levels = lvls)
-  
-  # Count of factor levels - nope should do this before subsetting to specific dates
-  # grp <- data.table(group_by_(all, f) %>% summarise(n = n()))
-  # names(grp)[2] <- paste("xf.n",f,sep=".")
-  # setkeyv(grp, f)
-  # setkeyv(all, f)
-  # all <- all[grp]
-}
+# for (f in names(train)[sapply(train, class) == "character"]) {
+#   cat("Transforming categorical field",f,fill=T)
+#   lvls <- unique(unique(train[[f]]),unique(test[[f]]))
+#   train[[f]] <- factor(train[[f]], levels = lvls)
+#   test[[f]] <- factor(test[[f]], levels = lvls)
+#   
+#   # Maybe drop the ones that already have a frequency associated
+#   
+#   # Count of factor levels - nope should do this before subsetting to specific dates
+#   # grp <- data.table(group_by_(all, f) %>% summarise(n = n()))
+#   # names(grp)[2] <- paste("xf.n",f,sep=".")
+#   # setkeyv(grp, f)
+#   # setkeyv(all, f)
+#   # all <- all[grp]
+# }
 
 # Remaining fields to numerics - not needed, data.matrix will do that
 
@@ -105,27 +144,39 @@ test <- merge(test, aggregates, all.x=TRUE)
 
 # Build multiclass model
 xgb.params <- list(objective = "multi:softprob",
-                   eval_metric = "mlogloss", # i really want "map@7" but get errors
-                   max.depth = 7,
+                   eval_metric = "merror", #"mlogloss", # i really want "map@7" but get errors
+                   max.depth = 5,
                    num_class = length(productFlds),
-                   eta = 0.01)
+                   eta = 0.05)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
 
-modelTrainFlds <- names(train)[which(!names(train) %in% c("product",productFlds))]
+modelTrainFlds <- names(train)[which(!names(train) %in% c("product","ncodpers",productFlds))]
 trainMatrix <- xgb.DMatrix(data.matrix(train[, modelTrainFlds, with=F]), 
                            missing=NaN, 
                            label=as.integer(train$product)-1)
 
-# xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
-#        nrounds=50, 
-#        nfold=5,
-#        maximize=F)
+cv <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
+       nrounds=100,
+       nfold=5,
+       maximize=F)
+cv2 <- rbindlist(list(data.frame(merror.mean = cv$train.merror.mean,
+                                 merror.std = cv$train.merror.std,
+                                 dataset = "train",
+                                 round = seq(1:nrow(cv))),
+                      data.frame(merror.mean = cv$test.merror.mean,
+                                 merror.std = cv$test.merror.std,
+                                 dataset = "test",
+                                 round = seq(1:nrow(cv)))))
+print(ggplot(cv2, aes(x=round, y=merror.mean, colour=dataset, group=dataset))+
+  geom_errorbar(aes(ymin=merror.mean-merror.std, ymax=merror.mean+merror.std))+
+  ggtitle(paste("CV error", "depth", xgb.params[["max.depth"]],"eta",xgb.params[["eta"]]))+
+  geom_line(colour="black"))
 
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
                 watchlist=list(train=trainMatrix),
-                nrounds=1000, 
+                nrounds=60, 
                 maximize=F)
 
 # Compute & plot feature importance matrix & summary tree
