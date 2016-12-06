@@ -12,9 +12,6 @@ train <- train[, names(train) %in% c("fecha_dato","ncodpers",productFlds), with=
 train$fecha_dato <- toMonthNr(train$fecha_dato)
 setkey(train, fecha_dato, ncodpers)
 
-# TODO: consider more months
-# TODO: consider not only product fields but also a (selected) few others
-
 # Aggregate: last month portfolio and size of portfolio
 interactionAggregates <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-1), ]
 interactionAggregates$fecha_dato <- interactionAggregates$fecha_dato+1
@@ -38,7 +35,6 @@ print(unique(train$fecha_dato)) # first month will be gone
 cat("train date:",trainDateNr,"test date:",testDateNr,fill=T)
 
 # Replace portfolio by the product changes (current month - last month)
-# TODO: consider checking for NA on y, as this would represent a new customer
 for (f in productFlds) {
   train[[f]] <- train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]]
   train[[paste(f,"x",sep=".")]] <- NULL
@@ -68,9 +64,6 @@ for (h in 1:maxHistoryWindow) {
   
   interactionAggregates <- merge(interactionAggregates, tmp, all.x=TRUE)
 }
-
-# TODO: consider customer overall nr of additions etc
-# TODO: consider trending variables (M1 - M2 etc)
 
 write.csv(interactionAggregates, paste(data_folder,"interactionAggregates.csv",sep="/"), row.names = F)
 

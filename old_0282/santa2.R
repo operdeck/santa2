@@ -25,7 +25,7 @@ library(scales)
 
 set.seed(12345)
 
-data_folder <- "data"
+data_folder <- "../data"
 # data_folder <- "data-unittest"
 
 data_colClasses <- list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
