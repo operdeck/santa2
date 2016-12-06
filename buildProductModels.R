@@ -15,6 +15,16 @@ train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_co
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
+# Test and train summaries are very similar
+# All of test ncodpers are in train. Almost all of train are in test.
+cat("Unique train customers",length(unique(train$ncodpers)),fill=T)
+train <- train[ncodpers %in% unique(test$ncodpers) ,]
+cat("Unique train customers after truncating to test persons",length(unique(train$ncodpers)),fill=T)
+
+cat("Train size before removing NAs",dim(train),fill=T)
+train <- train[!is.na(antiguedad),] # remove snapshots where customers were not customers yet 
+cat("Train size after removing NAs",dim(train),fill=T)
+
 # Add derived field with nr of distincts - before we truncate the train set to just certain dates
 # TODO potentially use test set as well
 
@@ -49,8 +59,6 @@ for (f in intersect(setdiff(names(train), c(productFlds,data_dateFlds,"ncodpers"
     test[[f]] <- factor(test[[f]], levels = lvls)
   }
 }
-
-# TODO: data cleaning (Age etc)
 
 # set aside outcomes of 1 month before test set
 testPrevPortfolio <- train[fecha_dato == testDatePrev, 
@@ -102,35 +110,57 @@ train2 <- train[, c("fecha_dato", "ncodpers", productFlds), with=F]
 train2$fecha_dato <- train2$fecha_dato+1
 setkey(train, fecha_dato, ncodpers)
 setkey(train2, fecha_dato, ncodpers)
-train <- merge(train, train2, all=FALSE) # inner join - only target date will remain
+train <- merge(train, train2, all.x=TRUE)
+train <- train[fecha_dato != min(train$fecha_dato),] # chop off first month
 rm(train2)
+
+# summary(train[, paste(productFlds,"x",sep="."), with=F])
+# summary(train[, paste(productFlds,"y",sep="."), with=F]) # many NA's...??
+# stop()
 
 # Replace portfolio by the portfolio difference of this and previous month; this is the outcome
 for (f in productFlds) {
-  train[[f]] <- train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]]
+  train[[f]] <- ifelse(is.na(train[[paste(f,"y",sep=".")]]),
+                       train[[paste(f,"x",sep=".")]],
+                       train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]])
   train[[paste(f,"x",sep=".")]] <- NULL
   train[[paste(f,"y",sep=".")]] <- NULL
 }
 
-cat("Train size before melting:", dim(train), "; unique persons:",length(unique(train$ncodpers)),fill = T)
+uniqueBefore <- length(unique(train$ncodpers))
+cat("Train size before melting:", dim(train), "; unique persons:",uniqueBefore,fill = T)
 train <- melt(train, id.vars = setdiff(names(train), productFlds), measure.vars = productFlds,
               variable.name = "product", value.name = "action")
-# super viz could be done here - 
-train <- train[action == 1,] # only keep the additions
-train$action <- NULL
-cat("Train size after melting:", dim(train), "; unique persons:",length(unique(train$ncodpers)),fill = T)
 
 productDistributions <-
   group_by(train, product) %>%
-  summarise(additions = n()) %>%
-  mutate(additions.rel = additions/nrow(train)) %>% 
-  arrange(additions.rel)
+  summarise(additions = sum(action==1, na.rm=T))
+productDistributions$additions.rel <- productDistributions$additions/sum(productDistributions$additions)
+productDistributions$dataset <- "Train"
+productDistributions <- arrange(productDistributions, additions.rel)
 
-print(ggplot(productDistributions, 
-       aes(factor(product, levels=unique(productDistributions$product)),additions.rel))+
-  geom_bar(stat="identity",position="dodge")+coord_flip()+
-  scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
-    xlab("product")+ylab("Added"))
+print(ggplot(filter(train, is.na(action) | action != 0), aes(factor(product, levels=productDistributions$product), fill=factor(action)))+
+        geom_bar()+coord_flip()+
+        ggtitle("Changes by product"))
+
+# print(ggplot(productDistributions, 
+#              aes(factor(product, levels=unique(productDistributions$product)),additions.rel))+
+#         geom_bar(stat="identity",position="dodge")+coord_flip()+
+#         scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
+#         xlab("product")+ylab("Added"))
+
+train <- train[action == 1,] # only keep the additions
+# TODO should we really throw away the non-buyers? Or is this another "outcome"?
+train$action <- NULL
+uniqueAfter <- length(unique(train$ncodpers))
+cat("Train size after melting:", dim(train), "; unique persons:",uniqueAfter,fill = T)
+
+print("Number of product additions to number of customers",fill=T)
+cat(uniqueBefore-uniqueAfter, "bought nothing",fill=T)
+print(group_by(train, ncodpers) %>% 
+        summarise(n_products = n()) %>% 
+        group_by(n_products) %>% 
+        summarise(n_customers = n()))
 
 cat("Unique customers in train set that made a purchase:",length(unique(train[,ncodpers])),fill=T)
 
@@ -142,17 +172,41 @@ setkey(aggregates, fecha_dato, ncodpers)
 train <- merge(train, aggregates, all.x=TRUE)
 test <- merge(test, aggregates, all.x=TRUE)
 
+map7 <- function(preds, dtrain) {
+  labels = getinfo(dtrain, 'label')
+  preds = t(matrix(preds, ncol = length(labels)))
+  preds = t(apply(preds, 1, order, decreasing = T))[, 1:7] - 1
+  succ = (preds == labels)
+  w = 1 / (1:7)
+  map7 = mean(succ %*% w)
+  return (list(metric = 'map7', value = map7))
+}
+
+# library(Metrics)
+# map7 <- function(preds, dtrain) {
+#   labels <- as.list(getinfo(dtrain,"label"))
+#   num.class = length(productFlds)
+#   pred <- matrix(preds, nrow = length(productFlds))
+#   top <- t(apply(pred, 2, function(y) order(y)[num.class:(num.class-6)]-1))
+#   top <- split(top, 1:NROW(top))
+# 
+#   map <- mapk(7, labels, top)
+#   return(list(metric = "map7", value = map))
+# }
+
+
 # Build multiclass model
 xgb.params <- list(objective = "multi:softprob",
-                   eval_metric = "merror", #"mlogloss", # i really want "map@7" but get errors
+                   #eval_metric = map7, #"merror", #"map7", # #"mlogloss", # i really want "map@7" but get errors
+                   eval_metric = "merror",
                    max.depth = 5,
                    num_class = length(productFlds),
-                   eta = 0.05)
+                   eta = 0.02)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
 
-modelTrainFlds <- names(train)[which(!names(train) %in% c("product","ncodpers",productFlds))]
+modelTrainFlds <- names(train)[which(!names(train) %in% c("product","ncodpers",data_dateFlds,productFlds))]
 trainMatrix <- xgb.DMatrix(data.matrix(train[, modelTrainFlds, with=F]), 
                            missing=NaN, 
                            label=as.integer(train$product)-1)
@@ -201,16 +255,13 @@ portfolioMultipliers <- left_join(portfolioMultipliers, (1-testPrevPortfolio), b
 
 # Viz distributions together with the earlier ones from the actual data
 print("Test distributions")
-productDistributions$dataset <- "Train"
 testDistrib <- data.frame(
   product   = productFlds,
   additions = rowSums(apply(-testProbabilities, 1, rank, ties.method = "first") <= 7),
   dataset   = "Test Predictions")
-testDistrib$dataset.total <- sum(testDistrib$additions) 
-testDistrib$additions.rel <- testDistrib$additions/testDistrib$dataset.total 
-productDistributions <- rbindlist(list(productDistributions, testDistrib), use.names = T, fill=T)
+testDistrib$additions.rel <- testDistrib$additions/sum(testDistrib$additions)
 
-print(ggplot(productDistributions, 
+print(ggplot(rbindlist(list(productDistributions, testDistrib), use.names = T, fill=T), 
              aes(factor(product, levels=unique(arrange(productDistributions,additions.rel)$product)),additions.rel,fill=dataset))+
         geom_bar(stat="identity",position="dodge")+coord_flip()+
         scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
