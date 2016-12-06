@@ -192,8 +192,8 @@ validateMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Validate", modelTrai
                            label=as.integer(train$product[train$dataset == "Validate"])-1)
 
 cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
-                    nrounds=10,
-                    nfold=500,
+                    nrounds=500,
+                    nfold=5,
                     maximize=F)
 
 cv2 <- rbindlist(list(data.frame(error.mean = cvresults[[paste("train",xgb.params[["eval_metric"]],"mean",sep=".")]],
