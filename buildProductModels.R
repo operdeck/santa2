@@ -270,7 +270,8 @@ testResults$added_products <- apply(testProbabilities, 1,
                                     function(row) { 
                                       paste(names(sort(rank(-row, ties.method = "first")))[1:7], collapse=" ") })
 print("Writing submission file...")
-write.csv(testResults, paste(data_folder,"newsubmission.csv",sep="/"),row.names = F, quote=F)
+submFile <- paste(data_folder,"newsubmission.csv",sep="/")
+write.csv(testResults, submFile,row.names = F, quote=F)
 
 # Get validation set back into original 'wide' format
 validationTruth <- spread(mutate(train[dataset == "Validate", 
@@ -296,6 +297,14 @@ for (i in 1:nrow(validationTruth)) {
 avgprecision <- avgprecision/nrow(validationTruth)
 cat("Average mean precision on validation set:",avgprecision,fill=T)
 
-
-zip(paste(data_folder,"newsubmission.csv.zip",sep="/"),paste(data_folder,"newsubmission.csv",sep="/"))
-
+# Zip up
+zipFile <- paste(data_folder,"newsubmission.csv.zip",sep="/")
+if (file.exists(zipFile)) {
+  file.remove(zipFile)
+}
+if (Sys.info()[["sysname"]] == "Windows") {
+  zip(zipFile, submFile,
+      zip="c:\\Program Files\\7-Zip\\7z.exe", flags="a")
+} else {
+  zip(zipFile,submFile)
+}
