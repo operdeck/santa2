@@ -15,14 +15,32 @@ setkey(train, fecha_dato, ncodpers)
 # TODO: consider more months
 # TODO: consider not only product fields but also a (selected) few others
 
-# Aggregate: last month portfolio and size of portfolio
+# Aggregate: last months portfolio and size of portfolio
 interactionAggregates <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-1), ]
 interactionAggregates$fecha_dato <- interactionAggregates$fecha_dato+1
-interactionAggregates[ , lastmonth.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
-setnames(interactionAggregates, productFlds, paste("lastmonth",productFlds,sep="."))
+interactionAggregates[ , lag.M1.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
+setnames(interactionAggregates, productFlds, paste("lag.M1",productFlds,sep="."))
+setkeyv(interactionAggregates, key(train))
 
-print(ggplot(interactionAggregates, aes(factor(lastmonth.portfolio.size), fill=factor(fecha_dato)))+
-        geom_bar()+ggtitle("Last month portfolio size for target dates"))
+lag.M2 <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-2), ]
+lag.M2$fecha_dato <- lag.M2$fecha_dato+2
+lag.M2[ , lag.M2.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
+setnames(lag.M2, productFlds, paste("lag.M2",productFlds,sep="."))
+setkeyv(lag.M2, key(train))
+interactionAggregates <- merge(interactionAggregates, lag.M2, all.x=TRUE)
+
+lag.M4 <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-4), ]
+lag.M4$fecha_dato <- lag.M4$fecha_dato+4
+lag.M4[ , lag.M4.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
+setnames(lag.M4, productFlds, paste("lag.M4",productFlds,sep="."))
+setkeyv(lag.M4, key(train))
+interactionAggregates <- merge(interactionAggregates, lag.M4, all.x=TRUE)
+
+# TODO: consider trend variables (M1 vs M4 etc)
+
+print(ggplot(gather(select(interactionAggregates, ends_with(".portfolio.size")), lag, size), 
+             aes(size, fill=factor(lag)))+
+        geom_bar(position = "dodge")+ggtitle("Portfolio size for target dates"))
 
 print(unique(train$fecha_dato))
 
@@ -38,9 +56,10 @@ print(unique(train$fecha_dato)) # first month will be gone
 cat("train date:",trainDateNr,"test date:",testDateNr,fill=T)
 
 # Replace portfolio by the product changes (current month - last month)
-# TODO: consider checking for NA on y, as this would represent a new customer
 for (f in productFlds) {
-  train[[f]] <- train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]]
+  train[[f]] <- ifelse(is.na(train[[paste(f,"y",sep=".")]]),
+                       train[[paste(f,"x",sep=".")]],
+                       train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]])
   train[[paste(f,"x",sep=".")]] <- NULL
   train[[paste(f,"y",sep=".")]] <- NULL
 }

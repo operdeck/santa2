@@ -107,14 +107,10 @@ rm(train2)
 # stop()
 
 # Replace portfolio by the portfolio difference of this and previous month; this is the outcome
-# TODO: consider checking for NA on y, as this would represent a new customer
-# **DONE**
 for (f in productFlds) {
   train[[f]] <- ifelse(is.na(train[[paste(f,"y",sep=".")]]),
                        train[[paste(f,"x",sep=".")]],
                        train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]])
-  
-  # train[[f]] <- train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]]
   train[[paste(f,"x",sep=".")]] <- NULL
   train[[paste(f,"y",sep=".")]] <- NULL
 }
