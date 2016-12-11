@@ -9,6 +9,8 @@
 source("santa2.R")
 source("metrics.R")
 
+library(caret)
+
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
 
@@ -67,12 +69,12 @@ bdaySet_prevmonth$fecha_dato <- 1 + bdaySet_prevmonth$fecha_dato
 setkeyv(bdaySet_prevmonth, key(bdaySet))
 birthdays <- merge(bdaySet, bdaySet_prevmonth) %>% 
   filter(age.x == (1+age.y)) %>% 
-  mutate(age.months.at.abirthday = 12*age.x) %>%
+  dplyr::mutate(age.months.at.abirthday = 12*age.x) %>%
   select(-age.x, -age.y) %>%
-  rename(date.at.abirthday = fecha_dato)
+  dplyr::rename(date.at.abirthday = fecha_dato)
 # some customers appear multiple times... fix this by taking first birthday
 birthdays <- data.table(group_by(birthdays, ncodpers) %>% 
-                          summarise(date.at.abirthday = min(date.at.abirthday),
+                          dplyr::summarise(date.at.abirthday = min(date.at.abirthday),
                                     age.months.at.abirthday = min(age.months.at.abirthday)))
 
 setkey(train, fecha_dato, ncodpers)
@@ -222,7 +224,7 @@ cat("Train size after melting:", dim(train), "; unique persons:",uniqueAfter,fil
 
 productDistributions <-
   group_by(train, product) %>%
-  summarise(additions = n(), additions.rel = n()/nrow(train)) %>%
+  dplyr::summarise(additions = n(), additions.rel = n()/nrow(train)) %>%
   arrange(additions.rel)
 
 print(ggplot(productDistributions, 
@@ -235,9 +237,9 @@ print(ggplot(productDistributions,
 nProductsByCusts <- rbind(data.frame(n_products = 0,
                                     n_customers = uniqueBefore-uniqueAfter),
                          group_by(train, ncodpers) %>%
-                           summarise(n_products = n()) %>%
+                           dplyr::summarise(n_products = n()) %>%
                            group_by(n_products) %>%
-                           summarise(n_customers = n()))
+                           dplyr::summarise(n_customers = n()))
 print(ggplot(nProductsByCusts, aes(x=factor(n_products), y=n_customers, label=n_customers))+
         geom_bar(stat="identity",fill="lightblue")+geom_text()+
         scale_y_log10()+
@@ -256,18 +258,18 @@ test <- merge(test, aggregates, all.x=TRUE)
 for (f in names(test)) {
   if (is.numeric(test[[f]]) & !is.integer(test[[f]])) {
     cat("Plotting numeric", f, fill=T)
-    print(ggplot(rbindlist(list(mutate(train[, f, with=F], dataset="Train"),
-                                mutate(test[, f, with=F], dataset="Test"))),
+    print(ggplot(rbindlist(list(dplyr::mutate(train[, f, with=F], dataset="Train"),
+                                dplyr::mutate(test[, f, with=F], dataset="Test"))),
                  aes_string(f, fill="dataset",  colour="dataset")) +
       geom_density(alpha = 0.2)+ggtitle(f))
   } else if (is.factor(test[[f]])) {
     cat("Plotting factor", f, fill=T)
     print(ggplot(rbindlist(list(group_by_(train, f) %>% 
-                                  summarise(pct = n()/nrow(train)) %>% 
-                                  mutate(dataset="Train"),
+                                  dplyr::summarise(pct = n()/nrow(train)) %>% 
+                                  dplyr::mutate(dataset="Train"),
                                 group_by_(test, f) %>% 
-                                  summarise(pct = n()/nrow(test)) %>% 
-                                  mutate(dataset="Test"))),
+                                  dplyr::summarise(pct = n()/nrow(test)) %>% 
+                                  dplyr::mutate(dataset="Test"))),
                  aes_string(f, "pct", fill="dataset",  colour="dataset")) +
             geom_bar(alpha = 0.2, position="dodge", stat="identity")+ggtitle(f))
   } else {
@@ -286,30 +288,54 @@ for (f in differentDistros) {
   train[[f]] <- NULL
 }
 
-
 # Build multiclass model
-# xgb.params <- list(objective = "multi:softprob",
-#                    eval_metric = "mlogloss", # i really want "map@7" but get errors
-#                    max.depth = 5,
-#                    num_class = length(productFlds),
-#                    eta = 0.01)
-
-xgb.params <- list(objective = "multi:softprob",
-                   eval_metric = "mlogloss", # i really want "map@7" but get errors
-                   max.depth = 5,
-                   min_child_weight = 2,
-                   colsample_bytree = 0.9,
-                   subsample = 0.9,
-                   num_class = length(productFlds),
-                   eta = 0.03)
-
-# See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
-# for custom error function
 
 modelTrainFlds <- names(train)[which(!names(train) %in% c("product","ncodpers",productFlds))]
 trainMatrix <- xgb.DMatrix(data.matrix(train[, modelTrainFlds, with=F]), 
                            missing=NaN, 
                            label=as.integer(train$product)-1)
+
+# Caret hyperparameter tuning
+caretHyperParamSearch <- trainControl(method = "cv", number=5, 
+                                      classProbs = TRUE,
+                                      summaryFunction = mnLogLoss,
+                                      verbose=T)
+searchGrid <- expand.grid(nrounds = seq(200, 500,by=100),
+                          eta = seq(0.01, 0.05, by=0.01),
+                          max_depth = 5:7,
+                          gamma = 2,
+                          colsample_bytree = 1,
+                          min_child_weight = 1,
+                          subsample = 1)
+predictors <- data.matrix(train[, modelTrainFlds, with=F])
+predictors[which(is.na(predictors))] <- 99999
+
+tuningResults <-
+  train(x = predictors,
+        y = factor(train$product, levels=unique(train$product)), # some products never occur
+        method = "xgbTree",
+        metric = "logLoss",
+        maximize = F,
+        trControl = caretHyperParamSearch,
+        tuneGrid = searchGrid)
+
+print(tuningResults)
+print(ggplot(tuningResults)+ggtitle("Hyperparameters"))
+
+stop()
+
+xgb.params <- list(objective = "multi:softprob",
+                   eval_metric = "mlogloss", # i really want "map@7" but get errors
+                   max.depth = 5,
+                   min_child_weight = 1,
+                   colsample_bytree = 1,
+                   subsample = 1,
+                   gamma = 2,
+                   num_class = length(productFlds),
+                   eta = 0.05)
+
+# See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
+# for custom error function
 
 # N-Fold cross validation to find best hyperparameters. Stratifying on the customer ID's
 # to keep validation fair (multiple entries exist for the same people, so otherwise there would
@@ -318,33 +344,36 @@ cv.nfold <- 5
 cv.rounds <- 500
 xgb.rounds <- 500
 
-allCusts <- unique(train$ncodpers)
-allCusts <- sample(allCusts, length(allCusts)) # shuffle
-cv.folds <- list()
-for (i in 1:cv.nfold) {
-  foldCusts <- allCusts[((length(allCusts) %/% 5)*(i-1)+1) : ((length(allCusts) %/% 5)*i)]
-  cv.folds[[i]] <- which(train$ncodpers %in% foldCusts)
+do.CV <- F
+if (do.CV) {
+  allCusts <- unique(train$ncodpers)
+  allCusts <- sample(allCusts, length(allCusts)) # shuffle
+  cv.folds <- list()
+  for (i in 1:cv.nfold) {
+    foldCusts <- allCusts[((length(allCusts) %/% 5)*(i-1)+1) : ((length(allCusts) %/% 5)*i)]
+    cv.folds[[i]] <- which(train$ncodpers %in% foldCusts)
+  }
+  cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
+                      nrounds=cv.rounds,
+                      folds=cv.folds,
+                      early.stop.round=10,
+                      maximize=F)
+  
+  # Vizualize results of cross validation
+  cv2 <- rbindlist(list(data.frame(error.mean = cvresults[[paste("train",xgb.params[["eval_metric"]],"mean",sep=".")]],
+                                   error.std = cvresults[[paste("train",xgb.params[["eval_metric"]],"std",sep=".")]],
+                                   dataset = "train",
+                                   round = seq(1:nrow(cvresults))),
+                        data.frame(error.mean = cvresults[[paste("test",xgb.params[["eval_metric"]],"mean",sep=".")]],
+                                   error.std = cvresults[[paste("test",xgb.params[["eval_metric"]],"std",sep=".")]],
+                                   dataset = "test",
+                                   round = seq(1:nrow(cvresults)))))
+  print(ggplot(cv2, aes(x=round, y=error.mean, colour=dataset, group=dataset))+
+          geom_errorbar(aes(ymin=error.mean-error.std, ymax=error.mean+error.std))+
+          ggtitle(paste("CV error", "depth", xgb.params[["max.depth"]],"eta",xgb.params[["eta"]]))+
+          geom_line(colour="black")+
+          ylab(xgb.params[["eval_metric"]]))
 }
-cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
-                    nrounds=cv.rounds,
-                    folds=cv.folds,
-                    early.stop.round=10,
-                    maximize=F)
-
-# Vizualize results of cross validation
-cv2 <- rbindlist(list(data.frame(error.mean = cvresults[[paste("train",xgb.params[["eval_metric"]],"mean",sep=".")]],
-                                 error.std = cvresults[[paste("train",xgb.params[["eval_metric"]],"std",sep=".")]],
-                                 dataset = "train",
-                                 round = seq(1:nrow(cvresults))),
-                      data.frame(error.mean = cvresults[[paste("test",xgb.params[["eval_metric"]],"mean",sep=".")]],
-                                 error.std = cvresults[[paste("test",xgb.params[["eval_metric"]],"std",sep=".")]],
-                                 dataset = "test",
-                                 round = seq(1:nrow(cvresults)))))
-print(ggplot(cv2, aes(x=round, y=error.mean, colour=dataset, group=dataset))+
-        geom_errorbar(aes(ymin=error.mean-error.std, ymax=error.mean+error.std))+
-        ggtitle(paste("CV error", "depth", xgb.params[["max.depth"]],"eta",xgb.params[["eta"]]))+
-        geom_line(colour="black")+
-        ylab(xgb.params[["eval_metric"]]))
 
 # Run the real model
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
@@ -395,9 +424,9 @@ testDistrib <- data.frame(
   stringsAsFactors = F)
 testDistrib$additions.rel <- testDistrib$additions/sum(testDistrib$additions) 
 
-print(ggplot(rbindlist(list(mutate(productDistributions, dataset="Distribution Train Set"), 
-                            mutate(trainDistrib, dataset="Predictions on Train Set"),
-                            mutate(testDistrib, dataset="Predictions on Test Set")), 
+print(ggplot(rbindlist(list(dplyr::mutate(productDistributions, dataset="Distribution Train Set"), 
+                            dplyr::mutate(trainDistrib, dataset="Predictions on Train Set"),
+                            dplyr::mutate(testDistrib, dataset="Predictions on Test Set")), 
                        use.names = T, fill=T), 
              aes(factor(product,levels=productDistributions$product),
                  additions.rel,fill=dataset))+
@@ -416,7 +445,7 @@ submFile <- paste(data_folder,"newsubmission.csv",sep="/")
 write.csv(testResults, submFile,row.names = F, quote=F)
 
 # Estimate the error. First back into original 'wide' format
-truth <- spread(mutate(train[,c( key(train), "product"), with=F], value=1),
+truth <- spread(dplyr::mutate(train[,c( key(train), "product"), with=F], value=1),
                 product, value, fill=0)
 for (f in setdiff(productFlds, names(truth))) {
   truth[[f]] <- 0 # some products are not present at all, make sure to have them
