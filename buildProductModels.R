@@ -9,9 +9,6 @@
 source("santa2.R")
 source("metrics.R")
 
-# TODO: validating like this really makes no sense, need a different approach
-validationRatio <- 0.1 # Split training sample into Train and Validate
-
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
 
@@ -21,7 +18,6 @@ test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colC
 #                            c("fecha_dato", "ncodpers", productFlds), with=F]
 # testPrevPortfolio$fecha_dato <- toMonthNr(testPrevPortfolio$fecha_dato)
 
-train <- train[fecha_dato %in% trainDates,]
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
 # TODO: consider truncating train set to test customers
@@ -37,29 +33,11 @@ productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purch
 # cat("Train size after removing NAs",dim(train),fill=T)
 
 allPersonz <- unique(train$ncodpers)
-cat("Train size:", dim(train), "; unique persons:",length(allPersonz),fill = T)
+cat("Train size:", dim(train), "; unique persons:",length(allPersonz),
+    "; date range", unique(train$fecha_dato), fill = T)
 
 # TODO: consider replacing or adding high cardinality symbolics
 # Add derived field with nr of distincts - before we truncate the train set to just certain dates
-
-# Split train/validation by persons
-
-split <- data.table(ncodpers = allPersonz,
-                    dataset = sample(c("Train","Validate"),length(allPersonz),replace=T,prob=c(1-validationRatio,validationRatio)))
-setkey(train, ncodpers)
-setkey(split, ncodpers)
-train <- train[split]
-
-# Concatenate both into one set makes it a lot easier to do all the 
-# data processing and generation of derived fields.
-# train/val not done properly!
-# test$dataset <- "Test"
-# all <- bind_rows(train, test)
-# rm(list=c("train","test"))
-
-print(ggplot(group_by(train, dataset) %>% summarise(n = n(), pct = n()/nrow(train)), 
-       aes(dataset,pct,label=n,fill=dataset))+
-  geom_bar(stat="identity")+geom_text()+scale_y_continuous(labels=percent)+ggtitle("Data set splits"))
 
 # Dates
 
@@ -73,9 +51,53 @@ for(i in 1:ncol(dateCombos)) {
   test[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- test[[dateCombos[1,i]]] - test[[dateCombos[2,i]]]
 }
 
+# This field antiguedad seems not set consistently. It is the same as diff_fecha_dato_fecha_alta anyway.
+train[["antiguedad"]] <- NULL
+test[["antiguedad"]] <- NULL
+
+# Figure out the birthdays here using both sets but only the more recent values because customer
+# fields in first 6 months are not set properly
+print("Set birthdays / fix age")
+
+bdaySet <- data.table(rbind(train[fecha_dato >= min(test$fecha_dato)-11, c("fecha_dato", "ncodpers", "age"), with=F],
+                 test[, c("fecha_dato", "ncodpers", "age"), with=F]) %>% arrange(ncodpers))
+setkeyv(bdaySet, c("ncodpers","fecha_dato"))
+bdaySet_prevmonth <- bdaySet
+bdaySet_prevmonth$fecha_dato <- 1 + bdaySet_prevmonth$fecha_dato
+setkeyv(bdaySet_prevmonth, key(bdaySet))
+birthdays <- merge(bdaySet, bdaySet_prevmonth) %>% 
+  filter(age.x == (1+age.y)) %>% 
+  mutate(age.months.at.abirthday = 12*age.x) %>%
+  select(-age.x, -age.y) %>%
+  rename(date.at.abirthday = fecha_dato)
+# some customers appear multiple times... fix this by taking first birthday
+birthdays <- data.table(group_by(birthdays, ncodpers) %>% 
+                          summarise(date.at.abirthday = min(date.at.abirthday),
+                                    age.months.at.abirthday = min(age.months.at.abirthday)))
+
+setkey(train, fecha_dato, ncodpers)
+setkeyv(test, key(train))
+setkey(birthdays, ncodpers)
+
+train <- merge(train, birthdays, all.x=T)
+age_in_months <- train$age.months.at.abirthday + train$fecha_dato - train$date.at.abirthday
+train$age <- age_in_months %/% 12
+train$is.birthday <- (age_in_months %% 12)==0
+train$months.to.18.bday <- abs(12*18 - age_in_months)
+train[, date.at.abirthday := NULL]
+train[, age.months.at.abirthday := NULL]
+
+test <- merge(test, birthdays, all.x=T)
+age_in_months <- test$age.months.at.abirthday + test$fecha_dato - test$date.at.abirthday
+test$age <- age_in_months %/% 12
+test$is.birthday <- (age_in_months %% 12)==0
+test$months.to.18.bday <- abs(12*18 - age_in_months)
+test[, date.at.abirthday := NULL]
+test[, age.months.at.abirthday := NULL]
+
 # Categorical
 
-for (f in setdiff(names(train)[sapply(train, class) == "character"], c("dataset"))) {
+for (f in names(train)[sapply(train, class) == "character"]) {
   cat("Transforming categorical field",f,fill=T)
   lvls <- unique(unique(train[[f]]),unique(test[[f]]))
   train[[f]] <- factor(train[[f]], levels = lvls)
@@ -91,11 +113,72 @@ for (f in setdiff(names(train)[sapply(train, class) == "character"], c("dataset"
 
 # Remaining fields to numerics - not needed, data.matrix will do that
 
+# Compare customer detail to previous month. Using matrix comparison and being very careful that
+# columns and rows are in the same order. Generate data sets that should be joined to the predictors. 
+
+# custDetailFields <- setdiff(names(train),c("dataset","fecha_dato",productFlds))
+# custDetailAtTrainMonth <- train[fecha_dato==trainDateNr, custDetailFields, with=F]
+# setorder(custDetailAtTrainMonth, ncodpers)
+# custDetailChangesTrain <- custDetailAtTrainMonth[,c("ncodpers"),with=F]
+# custDetailBeforeTrainMonth <- 
+#   merge(custDetailChangesTrain, 
+#         train[fecha_dato==(trainDateNr-1), custDetailFields, with=F], 
+#         by="ncodpers",
+#         all.x=TRUE, all.y=F)[,custDetailFields,with=F]
+# setorder(custDetailBeforeTrainMonth, ncodpers)
+# custDetailChangesTrain$cust.detail.diffToLastMonth <- rowSums((is.na(custDetailBeforeTrainMonth) & !is.na(custDetailAtTrainMonth)) | (custDetailAtTrainMonth != custDetailBeforeTrainMonth), na.rm=T)
+
+# custDetailAtTestMonth <- test[fecha_dato==testDateNr, custDetailFields, with=F]
+# setorder(custDetailAtTestMonth, ncodpers)
+# custDetailChangesTest <- custDetailAtTestMonth[,c("ncodpers"),with=F]
+# custDetailBeforeTestMonth <- 
+#   merge(custDetailChangesTest, 
+#         train[fecha_dato==(testDateNr-1), custDetailFields, with=F],  # from train set!
+#         by="ncodpers",
+#         all.x=TRUE, all.y=F)[,custDetailFields,with=F]
+# setorder(custDetailBeforeTestMonth, ncodpers)
+# custDetailChangesTest$cust.detail.diffToLastMonth <- rowSums((is.na(custDetailBeforeTestMonth) & !is.na(custDetailAtTestMonth)) | (custDetailAtTestMonth != custDetailBeforeTestMonth), na.rm=T)
+
+# test$cust.detail.turned18 <- train[, ]
+# # NB: because customer attributes in first 6 months are unreliable. This relies on the fact that test & train dates
+# # are exactly 12 months apart
+# custDetailChangesTrain$cust.detail.turned18 <- (custDetailBeforeTestMonth$age == 18 & custDetailAtTestMonth$age == 19)
+
+# easier...
+
+# TODO use and TODO check correct for npers etc.
+# 
+# print(
+# ggplot(rbindlist(list(mutate(custDetailChangesTrain,dataset="train"),
+#                       mutate(custDetailChangesTrain[ncodpers %in% custDetailChangesTest$ncodpers,],dataset="train-test custs"),
+#                       mutate(custDetailChangesTest,dataset="test"))), 
+#        aes(factor(cust.detail.diffToLastMonth),fill=dataset)) + 
+#   geom_bar(position="dodge") +scale_y_log10()+ggtitle("Changes in Customer Record since last month")
+# )
+# 
+# print(
+#   ggplot(rbindlist(list(mutate(custDetailChangesTrain,dataset="train"),
+#                         mutate(custDetailChangesTrain[ncodpers %in% custDetailChangesTest$ncodpers,],dataset="train-test custs"),
+#                         mutate(custDetailChangesTest,dataset="test"))), 
+#          aes(factor(cust.detail.turned18),fill=dataset)) + 
+#     geom_bar(position="dodge") +scale_y_log10()+ggtitle("Customers turned 18")
+# )
+
+
+# TODO: plot suggests to be careful, maybe only for 1 or 2 change - rest looks too different
+# TODO: here or elsewhere add flag for "turned18" etc.
+# TODO: use this data...
+
+# Subset the train data to only one year before the test date.
+# TODO: vary on this theme
+
+train <- train[fecha_dato %in% trainDateNrs,]
+
 # Set outcome by subtracting last month portfolio
-train2 <- train[, c("fecha_dato", "ncodpers", productFlds), with=F]
-train2$fecha_dato <- train2$fecha_dato+1
 setkey(train, fecha_dato, ncodpers)
-setkey(train2, fecha_dato, ncodpers)
+train2 <- train[, c(key(train), productFlds), with=F]
+train2$fecha_dato <- train2$fecha_dato+1
+setkeyv(train2, key(train))
 train <- merge(train, train2, all=FALSE) # inner join - only target date will remain
 # TODO consider this, or is this really the same?
 # train <- merge(train, train2, all.x=TRUE)
@@ -138,60 +221,117 @@ uniqueAfter <- length(unique(train$ncodpers))
 cat("Train size after melting:", dim(train), "; unique persons:",uniqueAfter,fill = T)
 
 productDistributions <-
-  group_by(train, product, dataset) %>%
-  summarise(additions = n()) %>%
-  left_join(group_by(train, dataset) %>% summarise(dataset.total = n()), by="dataset") %>%
-  mutate(additions.rel = additions/dataset.total) %>% 
+  group_by(train, product) %>%
+  summarise(additions = n(), additions.rel = n()/nrow(train)) %>%
   arrange(additions.rel)
 
 print(ggplot(productDistributions, 
-       aes(factor(product, levels=unique(productDistributions$product)),additions.rel,fill=dataset))+
-  geom_bar(stat="identity",position="dodge")+coord_flip()+
-  scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
+       aes(factor(product, levels=unique(productDistributions$product)),additions.rel,label=additions))+
+      geom_bar(stat="identity",position="dodge",fill="lightblue")+coord_flip()+
+      geom_text()+
+      scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
     xlab("product")+ylab("Added"))
 
-print("Number of product additions to number of customers",fill=T)
-cat(uniqueBefore-uniqueAfter, "bought nothing",fill=T)
-print(group_by(train, ncodpers) %>%
-        summarise(n_products = n()) %>%
-        group_by(n_products) %>%
-        summarise(n_customers = n()))
-
-cat("Unique customers that made a purchase:",length(unique(train[,ncodpers])),fill=T)
-cat("Unique customers in train set that made a purchase:",length(unique(train[dataset=="Train",ncodpers])),fill=T)
-cat("Unique customers in validate set that made a purchase:",length(unique(train[dataset=="Validate",ncodpers])),fill=T)
+nProductsByCusts <- rbind(data.frame(n_products = 0,
+                                    n_customers = uniqueBefore-uniqueAfter),
+                         group_by(train, ncodpers) %>%
+                           summarise(n_products = n()) %>%
+                           group_by(n_products) %>%
+                           summarise(n_customers = n()))
+print(ggplot(nProductsByCusts, aes(x=factor(n_products), y=n_customers, label=n_customers))+
+        geom_bar(stat="identity",fill="lightblue")+geom_text()+
+        scale_y_log10()+
+        ggtitle("How many people bought how many products?"))
 
 # Join in extra fields
+
 aggregates <- fread(paste(data_folder,"interactionAggregates.csv",sep="/"))
 setkey(train, fecha_dato, ncodpers)
-setkey(test, fecha_dato, ncodpers)
-setkey(aggregates, fecha_dato, ncodpers)
+setkeyv(test, key(train))
+setkeyv(aggregates, key(train))
 train <- merge(train, aggregates, all.x=TRUE)
 test <- merge(test, aggregates, all.x=TRUE)
 
+# Show distributions of predictors in train vs test
+for (f in names(test)) {
+  if (is.numeric(test[[f]]) & !is.integer(test[[f]])) {
+    cat("Plotting numeric", f, fill=T)
+    print(ggplot(rbindlist(list(mutate(train[, f, with=F], dataset="Train"),
+                                mutate(test[, f, with=F], dataset="Test"))),
+                 aes_string(f, fill="dataset",  colour="dataset")) +
+      geom_density(alpha = 0.2)+ggtitle(f))
+  } else if (is.factor(test[[f]])) {
+    cat("Plotting factor", f, fill=T)
+    print(ggplot(rbindlist(list(group_by_(train, f) %>% 
+                                  summarise(pct = n()/nrow(train)) %>% 
+                                  mutate(dataset="Train"),
+                                group_by_(test, f) %>% 
+                                  summarise(pct = n()/nrow(test)) %>% 
+                                  mutate(dataset="Test"))),
+                 aes_string(f, "pct", fill="dataset",  colour="dataset")) +
+            geom_bar(alpha = 0.2, position="dodge", stat="identity")+ggtitle(f))
+  } else {
+    cat("Not plotting", f, class(test[[f]]), fill=T)
+  }
+}
+
+#### TODO: plot the integers too. Factors only top-50 or so.
+
+
+# Based on plots, drop these
+differentDistros <- c("diff_fecha_dato_ult_fec_cli_1t", "ult_fec_cli_1t",
+                      "tiprel_1mes")
+for (f in differentDistros) {
+  test[[f]] <- NULL
+  train[[f]] <- NULL
+}
+
+
 # Build multiclass model
+# xgb.params <- list(objective = "multi:softprob",
+#                    eval_metric = "mlogloss", # i really want "map@7" but get errors
+#                    max.depth = 5,
+#                    num_class = length(productFlds),
+#                    eta = 0.01)
+
 xgb.params <- list(objective = "multi:softprob",
                    eval_metric = "mlogloss", # i really want "map@7" but get errors
                    max.depth = 5,
+                   min_child_weight = 2,
+                   colsample_bytree = 0.9,
+                   subsample = 0.9,
                    num_class = length(productFlds),
-                   eta = 0.01)
+                   eta = 0.03)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
 
-modelTrainFlds <- names(train)[which(!names(train) %in% c("product","dataset",productFlds))]
-trainMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Train", modelTrainFlds, with=F]), 
+modelTrainFlds <- names(train)[which(!names(train) %in% c("product","ncodpers",productFlds))]
+trainMatrix <- xgb.DMatrix(data.matrix(train[, modelTrainFlds, with=F]), 
                            missing=NaN, 
-                           label=as.integer(train$product[train$dataset == "Train"])-1)
-validateMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Validate", modelTrainFlds, with=F]), 
-                           missing=NaN, 
-                           label=as.integer(train$product[train$dataset == "Validate"])-1)
+                           label=as.integer(train$product)-1)
 
+# N-Fold cross validation to find best hyperparameters. Stratifying on the customer ID's
+# to keep validation fair (multiple entries exist for the same people, so otherwise there would
+# be leakage)
+cv.nfold <- 5
+cv.rounds <- 500
+xgb.rounds <- 500
+
+allCusts <- unique(train$ncodpers)
+allCusts <- sample(allCusts, length(allCusts)) # shuffle
+cv.folds <- list()
+for (i in 1:cv.nfold) {
+  foldCusts <- allCusts[((length(allCusts) %/% 5)*(i-1)+1) : ((length(allCusts) %/% 5)*i)]
+  cv.folds[[i]] <- which(train$ncodpers %in% foldCusts)
+}
 cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
-                    nrounds=500,
-                    nfold=5,
+                    nrounds=cv.rounds,
+                    folds=cv.folds,
+                    early.stop.round=10,
                     maximize=F)
 
+# Vizualize results of cross validation
 cv2 <- rbindlist(list(data.frame(error.mean = cvresults[[paste("train",xgb.params[["eval_metric"]],"mean",sep=".")]],
                                  error.std = cvresults[[paste("train",xgb.params[["eval_metric"]],"std",sep=".")]],
                                  dataset = "train",
@@ -206,24 +346,28 @@ print(ggplot(cv2, aes(x=round, y=error.mean, colour=dataset, group=dataset))+
         geom_line(colour="black")+
         ylab(xgb.params[["eval_metric"]]))
 
+# Run the real model
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
-                watchlist=list(train=trainMatrix, validate=validateMatrix),
-                nrounds=500, 
+                watchlist=list(train=trainMatrix),
+                nrounds=xgb.rounds, 
                 maximize=F)
 
 # Compute & plot feature importance matrix & summary tree
 print("Feature importance matrix...")
 importance_matrix <- xgb.importance(modelTrainFlds, model = bst)
-print(xgb.plot.importance(importance_matrix))
+print(importance_matrix)
+print(xgb.plot.importance(head(importance_matrix, min(20, nrow(importance_matrix)))))
 
+# Version 0.6 will support this
 # xgb.plot.tree(feature_names = dimnames(trainMatrix)[[2]], model = bst, n_first_tree = 2)
 # xgb.plot.multi.trees(model = bst, feature_names = dimnames(trainMatrix)[[2]], features.keep = 3)
 
-print("Test/Validate predictions...")
-xgbpred <- predict(bst, validateMatrix, missing=NaN)
-validateProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=sum(train$dataset == "Validate")))
-colnames(validateProbabilities) <- productFlds
+print("Train predictions...")
+xgbpred <- predict(bst, trainMatrix, missing=NaN)
+trainProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=nrow(train)))
+colnames(trainProbabilities) <- productFlds
 
+print("Test predictions...")
 testMatrix <- xgb.DMatrix(data.matrix(test[, modelTrainFlds, with=F]), missing=NaN)
 xgbpred <- predict(bst, testMatrix, missing=NaN)
 testProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=nrow(test)))
@@ -237,27 +381,28 @@ colnames(testProbabilities) <- productFlds
 # with multiply: 0.0279001, without: 0.0279001. Really? 
 
 # Viz distributions together with the earlier ones from the actual data
-print("Test/Validate distributions")
+print("Test distributions")
+
+trainDistrib <- data.frame(
+  product   = productFlds,
+  additions = rowSums(apply(-trainProbabilities, 1, rank, ties.method = "first") <= 7),
+  stringsAsFactors = F)
+trainDistrib$additions.rel <- trainDistrib$additions/sum(trainDistrib$additions) 
+
 testDistrib <- data.frame(
   product   = productFlds,
   additions = rowSums(apply(-testProbabilities, 1, rank, ties.method = "first") <= 7),
-  dataset   = "Test Predictions",
   stringsAsFactors = F)
-testDistrib$dataset.total <- sum(testDistrib$additions) 
-testDistrib$additions.rel <- testDistrib$additions/testDistrib$dataset.total 
+testDistrib$additions.rel <- testDistrib$additions/sum(testDistrib$additions) 
 
-validateDistrib <- data.frame(
-  product   = productFlds,
-  additions = rowSums(apply(-validateProbabilities, 1, rank, ties.method = "first") <= 7),
-  dataset   = "Validate Predictions",
-  stringsAsFactors = F)
-validateDistrib$dataset.total <- sum(validateDistrib$additions) 
-validateDistrib$additions.rel <- validateDistrib$additions/validateDistrib$dataset.total 
-
-print(ggplot(rbindlist(list(productDistributions, testDistrib, validateDistrib), use.names = T, fill=T), 
-             aes(factor(product, levels=unique(arrange(productDistributions,additions.rel)$product)),additions.rel,fill=dataset))+
+print(ggplot(rbindlist(list(mutate(productDistributions, dataset="Distribution Train Set"), 
+                            mutate(trainDistrib, dataset="Predictions on Train Set"),
+                            mutate(testDistrib, dataset="Predictions on Test Set")), 
+                       use.names = T, fill=T), 
+             aes(factor(product,levels=productDistributions$product),
+                 additions.rel,fill=dataset))+
         geom_bar(stat="identity",position="dodge")+coord_flip()+
-        scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
+        scale_y_continuous(labels = percent)+ggtitle("Product additions")+
         xlab("product")+ylab("Added"))
 
 print("Assembling results...")
@@ -265,33 +410,32 @@ testResults <- data.frame(ncodpers = test[, ncodpers])
 testResults$added_products <- apply(testProbabilities, 1, 
                                     function(row) { 
                                       paste(names(sort(rank(-row, ties.method = "first")))[1:7], collapse=" ") })
+
 print("Writing submission file...")
 submFile <- paste(data_folder,"newsubmission.csv",sep="/")
 write.csv(testResults, submFile,row.names = F, quote=F)
 
-# Get validation set back into original 'wide' format
-validationTruth <- spread(mutate(train[dataset == "Validate", 
-                     c("fecha_dato","ncodpers","product"), with=F], value=1),
-       product, value, fill=0)
-for (f in setdiff(productFlds,names(validationTruth))) {
-  validationTruth[[f]] <- 0
+# Estimate the error. First back into original 'wide' format
+truth <- spread(mutate(train[,c( key(train), "product"), with=F], value=1),
+                product, value, fill=0)
+for (f in setdiff(productFlds, names(truth))) {
+  truth[[f]] <- 0 # some products are not present at all, make sure to have them
 }
-validationTruth <- validationTruth[, c("fecha_dato","ncodpers", productFlds)]
+truth <- truth[, productFlds] # correct order
 
-# Get validation predictions but remove the duplicates (these happened because the 
-# data was melted to long format)
-validationWideRowz <- which( !duplicated(data.matrix(train[dataset == "Validate", c("fecha_dato","ncodpers"), with=F])) )
-validationPredicitons <- validateProbabilities[validationWideRowz,productFlds]
+# Remove the duplicates (these happened because the data was melted to long format)
+predictedAsWideRowz <- which( !duplicated(data.matrix(train[, key(train), with=F])) )
+trainPredictions <- trainProbabilities[predictedAsWideRowz, productFlds]
 
 # Calculate score on validation set - TODO get this much faster
+print("Average mean precision on train set...")
 avgprecision <- 0
-for (i in 1:nrow(validationTruth)) {
-  truth <- validationTruth[i,productFlds]
-  predranks <- rank(-validationPredicitons[i, productFlds], ties.method = "first")
-  avgprecision <- avgprecision + mapk(truth == 1, predranks, 7)
+for (i in 1:nrow(truth)) {
+  predranks <- rank(-trainPredictions[i, productFlds], ties.method = "first")
+  avgprecision <- avgprecision + mapk(truth[i,] == 1, predranks, 7)
 }
-avgprecision <- avgprecision/nrow(validationTruth)
-cat("Average mean precision on validation set:",avgprecision,fill=T)
+avgprecision <- avgprecision/nrow(truth)
+cat("Average mean precision on train set:",avgprecision,fill=T)
 
 # Zip up
 zipFile <- paste(data_folder,"newsubmission.csv.zip",sep="/")

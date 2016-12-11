@@ -9,15 +9,16 @@ mapk <- function(truth, predranks, k=length(predranks)) {
   idxs <- seq(k)
   
   # cat("Truth: ", letters[seq(length(truth))][truth], fill=T)
-  # cat("Preds: ", letters[1:max(predranks)][predranks], fill=T) 
+  # cat("Preds: ", letters[1:max(predranks)][predranks], fill=T)
   
-  # map_nom <- (truth[predranks]*cumsum(truth[predranks]))[1:k]
-  map_nom <- (cumsum(truth[predranks]))[1:k]
+  map_nom <- (truth[predranks]*cumsum(truth[predranks]))[1:k]
+  # map_nom <- (cumsum(truth[predranks]))[1:k]
   
   # cat("MAP nominator:", map_nom, fill=T)
   # cat("MAP denominator:", idxs, fill=T)
   
   result <- mean(map_nom/idxs)
+
   # cat("MAP = mean of",map_nom/idxs, "=",result,fill=T)
   
   return(result)

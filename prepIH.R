@@ -8,12 +8,22 @@ source("santa2.R")
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))]
 
-train <- train[, names(train) %in% c("fecha_dato","ncodpers",productFlds), with=F]
+train <- train[, names(train) %in% c("fecha_dato","ncodpers", # keys
+                                     # "age", "renta", "tiprel_1mes", "ind_actividad_cliente", 
+                                     # "ind_nuevo", "indrel", "indrel_1mes", # extra fields interesting for lag
+                                     productFlds), with=F]
 train$fecha_dato <- toMonthNr(train$fecha_dato)
 setkey(train, fecha_dato, ncodpers)
 
-# TODO: consider more months
-# TODO: consider not only product fields but also a (selected) few others
+# Convert character fields to factor levels
+for (f in names(train)[!sapply(train, is.numeric)]) {
+  train[[f]] <- as.integer(factor(train[[f]]))
+}
+
+# TODO: consider even more months
+# TODO: consider trend variables (M1 vs M4 etc)
+# TODO: data from the full history could potentially be useful to cluster the customers
+# TODO: bucket customers into perhaps 50 clusters
 
 # Aggregate: last months portfolio and size of portfolio
 interactionAggregates <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-1), ]
@@ -29,6 +39,13 @@ setnames(lag.M2, productFlds, paste("lag.M2",productFlds,sep="."))
 setkeyv(lag.M2, key(train))
 interactionAggregates <- merge(interactionAggregates, lag.M2, all.x=TRUE)
 
+lag.M3 <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-3), ]
+lag.M3$fecha_dato <- lag.M3$fecha_dato+3
+lag.M3[ , lag.M3.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
+setnames(lag.M3, productFlds, paste("lag.M3",productFlds,sep="."))
+setkeyv(lag.M3, key(train))
+interactionAggregates <- merge(interactionAggregates, lag.M3, all.x=TRUE)
+
 lag.M4 <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-4), ]
 lag.M4$fecha_dato <- lag.M4$fecha_dato+4
 lag.M4[ , lag.M4.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
@@ -36,7 +53,6 @@ setnames(lag.M4, productFlds, paste("lag.M4",productFlds,sep="."))
 setkeyv(lag.M4, key(train))
 interactionAggregates <- merge(interactionAggregates, lag.M4, all.x=TRUE)
 
-# TODO: consider trend variables (M1 vs M4 etc)
 
 print(ggplot(gather(select(interactionAggregates, ends_with(".portfolio.size")), lag, size), 
              aes(size, fill=factor(lag)))+
@@ -70,6 +86,14 @@ train[ , n.additions := rowSums(.SD == 1, na.rm=T), .SDcols = productFlds]
 train[ , n.removals  := rowSums(.SD == -1, na.rm=T), .SDcols = productFlds]
 train[ , n.change    := rowSums(.SD != 0, na.rm=T), .SDcols = productFlds]
 
+# Aggregate to person level
+# TODO consider clustering persons on this and other attributes (or in the main file)
+customerAggregates <- train[ , list(person.additions=sum(n.additions, na.rm = T),
+                                    person.removals=sum(n.removals, na.rm = T),
+                                    person.change=sum(n.change, na.rm = T)), by=ncodpers]
+setkey(customerAggregates, ncodpers)
+interactionAggregates <- merge(interactionAggregates, customerAggregates, all.x = T, by = "ncodpers")
+
 # Aggregate: number of additions etc across all products in the last N months
 setkey(interactionAggregates, fecha_dato, ncodpers)
 maxHistoryWindow <- trainDateNr-min(train$fecha_dato)
@@ -78,9 +102,17 @@ for (h in 1:maxHistoryWindow) {
   # NB could be faster if needed
   # other aggregates here as well?
   tmp <- rbind(train[ fecha_dato >= (trainDateNr-h) & fecha_dato <= (trainDateNr-1), 
-                      list(fecha_dato = trainDateNr, n.additions = sum(n.additions, na.rm=T), n.removals = sum(n.removals, na.rm=T), n.changes = sum(n.change, na.rm=T)), by=ncodpers ],
+                      list(fecha_dato = trainDateNr, 
+                           n.additions = sum(n.additions, na.rm=T), 
+                           n.removals = sum(n.removals, na.rm=T), 
+                           n.changes = sum(n.change, na.rm=T)), 
+                      by=ncodpers ],
                train[ fecha_dato >= (testDateNr-h) & fecha_dato <= (testDateNr-1), 
-                      list(fecha_dato = testDateNr, n.additions = sum(n.additions, na.rm=T), n.removals = sum(n.removals, na.rm=T), n.changes = sum(n.change, na.rm=T)), by=ncodpers ])
+                      list(fecha_dato = testDateNr, 
+                           n.additions = sum(n.additions, na.rm=T), 
+                           n.removals = sum(n.removals, na.rm=T), 
+                           n.changes = sum(n.change, na.rm=T)), 
+                      by=ncodpers ])
   
   setnames(tmp, names(tmp)[3:length(names(tmp))], paste(names(tmp)[3:length(names(tmp))], ".M", h, sep=""))
   setkey(tmp, fecha_dato, ncodpers)
@@ -88,8 +120,10 @@ for (h in 1:maxHistoryWindow) {
   interactionAggregates <- merge(interactionAggregates, tmp, all.x=TRUE)
 }
 
-# TODO: consider customer overall nr of additions etc
 # TODO: consider trending variables (M1 - M2 etc)
 
+print(summary(interactionAggregates))
+
 write.csv(interactionAggregates, paste(data_folder,"interactionAggregates.csv",sep="/"), row.names = F)
+
 
