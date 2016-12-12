@@ -1,33 +1,6 @@
 # Calculates the mean average precision given a vector of items (the truth) and
 # a vector of rank predictions.
-
-# TODO double check this stuff
-# See below, which probably directly works on the preds from XGBoost
-# so can be used as a metric!
-# library(Metrics)
-# map5 <- function(preds, dtrain) {
-#   labels <- as.list(getinfo(dtrain,"label"))
-#   num.class = 100
-#   pred <- matrix(preds, nrow = num.class)
-#   top <- t(apply(pred, 2, function(y) order(y)[num.class:(num.class-4)]-1))
-#   top <- split(top, 1:NROW(top))
-#   
-#   map <- mapk(5, labels, top)
-#   return(list(metric = "map5", value = map))
-# }
-# Then set eval_metric=map5 in your params.
-# or
-# map5 = function(preds, dtrain) {
-#   labels = getinfo(dtrain, 'label')
-#   preds = t(matrix(preds, ncol = length(labels)))
-#   preds = t(apply(preds, 1, order, decreasing = T))[, 1:5] - 1
-#   succ = (preds == labels)
-#   w = 1 / (1:5)
-#   map5 = mean(succ %*% w)
-#   return (list(metric = 'map5', value = map5))
-# }
-# https://www.kaggle.com/c/expedia-hotel-recommendations/forums/t/20556/map5-function-or-eval-metric?forumMessageId=120974
-
+#
 # 'truth' is vector of T/F's indicating items presence
 # 'predranks' is vector of ranks of each item in the prediction
 # 'k' is size of top ranking to consider - defaults to all
@@ -39,14 +12,12 @@ mapk <- function(truth, predranks, k=length(predranks)) {
   # cat("Preds: ", letters[1:max(predranks)][predranks], fill=T) 
   
   # map_nom <- (truth[predranks]*cumsum(truth[predranks]))[1:k]
-  # map_nom <- (cumsum(truth[predranks]))[1:k]
-  topK <- truth[names(predranks)[predranks <= k]]
-  map_nom <- topK*cumsum(topK)
+  map_nom <- (cumsum(truth[predranks]))[1:k]
   
   # cat("MAP nominator:", map_nom, fill=T)
   # cat("MAP denominator:", idxs, fill=T)
   
-  result <- mean(map_nom/idxs, na.rm = T)
+  result <- mean(map_nom/idxs)
   # cat("MAP = mean of",map_nom/idxs, "=",result,fill=T)
   
   return(result)

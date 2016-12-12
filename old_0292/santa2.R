@@ -25,17 +25,15 @@ library(scales)
 
 set.seed(12345)
 
-data_folder <- "data"
+data_folder <- "../data"
 # data_folder <- "data-unittest"
 
 data_colClasses <- list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
 data_dateFlds <- c("fecha_dato","fecha_alta","ult_fec_cli_1t")
 
 trainDate <- c('2015-06-28')
-trainDatePrev <- c('2015-05-28')
+trainDates <- c('2015-06-28','2015-05-28') # previous month needed to calculate outcomes
 testDate <- c('2016-06-28')
-testDatePrev <- c('2016-05-28')
-trainDates <- c(trainDatePrev, trainDate) # previous month needed to calculate outcomes
 
 toMonthNr <- function(str)
 {
