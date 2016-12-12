@@ -300,9 +300,9 @@ caretHyperParamSearch <- trainControl(method = "cv", number=5,
                                       classProbs = TRUE,
                                       summaryFunction = mnLogLoss,
                                       verbose=T)
-searchGrid <- expand.grid(nrounds = seq(200, 500,by=100),
-                          eta = seq(0.01, 0.05, by=0.01),
-                          max_depth = 5:7,
+searchGrid <- expand.grid(nrounds = seq(200, 800,by=100),
+                          eta = seq(0.02, 0.08, by=0.02),
+                          max_depth = 4:7,
                           gamma = 2,
                           colsample_bytree = 1,
                           min_child_weight = 1,
@@ -322,7 +322,14 @@ tuningResults <-
 print(tuningResults)
 print(ggplot(tuningResults)+ggtitle("Hyperparameters"))
 
+# The final values used for the model were nrounds =
+#   800, max_depth = 5, eta = 0.04, gamma = 2, colsample_bytree
+# = 1, min_child_weight = 1 and subsample = 1.
+
 stop()
+cv.nfold <- 5
+cv.rounds <- 500
+xgb.rounds <- 800
 
 xgb.params <- list(objective = "multi:softprob",
                    eval_metric = "mlogloss", # i really want "map@7" but get errors
@@ -332,7 +339,7 @@ xgb.params <- list(objective = "multi:softprob",
                    subsample = 1,
                    gamma = 2,
                    num_class = length(productFlds),
-                   eta = 0.05)
+                   eta = 0.04)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
@@ -340,9 +347,6 @@ xgb.params <- list(objective = "multi:softprob",
 # N-Fold cross validation to find best hyperparameters. Stratifying on the customer ID's
 # to keep validation fair (multiple entries exist for the same people, so otherwise there would
 # be leakage)
-cv.nfold <- 5
-cv.rounds <- 500
-xgb.rounds <- 500
 
 do.CV <- F
 if (do.CV) {
