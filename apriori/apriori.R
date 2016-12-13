@@ -1,8 +1,11 @@
 # Kaggle Santander 2 
-# predictions without models, purely based on apriori probabilities
+# predictions without models, purely based on a priori probabilities
+# Scores 0.0183025 on LB
 
 library(data.table)
 library(fasttime)
+
+# Read data
 
 data_folder <- "../data"
 data_colClasses <- list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
@@ -15,14 +18,20 @@ train$fecha_dato <- fastPOSIXct(train$fecha_dato)
 test$fecha_dato <- fastPOSIXct(test$fecha_dato)
 train$monthnr <- month(train$fecha_dato)+ 12*year(train$fecha_dato)-1
 test$monthnr <- month(test$fecha_dato)+ 12*year(test$fecha_dato)-1
-train$nextmonthnr <- 1+train$monthnr
 
+# Self-merge so previous month is next to current month
+
+train$nextmonthnr <- 1+train$monthnr
 train <- merge(train, train, by.x=c("ncodpers","monthnr"), by.y=c("ncodpers","nextmonthnr"))
+
+# Outcomes are products in portfolio this month but not in previous
+
 d1 <- as.matrix( train[, paste(productFlds, "x", sep="."), with=F])
 d2 <- as.matrix( train[, paste(productFlds, "y", sep="."), with=F])
-productAprioris <- colSums((d1 == 1) & (is.na(d2) | (d2 == 0)), na.rm = T) / colSums(!is.na(d1) & !is.na(d2)) 
-# names(productAprioris) <- productFlds
-# productAprioris <- sort(productAprioris,decreasing = T)
+aPrioris <- colSums((d1 == 1) & (is.na(d2) | (d2 == 0)), na.rm = T) / colSums(!is.na(d1) & !is.na(d2)) 
+
+# Merge the test set with the last month from the train set so we can null out the
+# probabilities for products already owned, otherwise set them to the a priori probabilities
 
 test <- merge(test[, c("ncodpers","monthnr"), with=F], 
               train[, c("ncodpers","nextmonthnr",paste(productFlds, "x", sep=".")), with=F], 
@@ -30,9 +39,19 @@ test <- merge(test[, c("ncodpers","monthnr"), with=F],
               all.x = T, all.y = F)
 setnames(test, paste(productFlds, "x", sep="."), productFlds)
 
-xxx <- apply( 1-as.matrix(test[1:8, productFlds, with=F]), 1, "*", productAprioris)
-apply(xxx, 2, function(col) {
+probs <- apply( 1-as.matrix(test[, productFlds, with=F]), 1, "*", aPrioris)
+
+# Just for verification, check the resulting probabilities
+aPosterioris <- rowSums(apply(-probs, 2, rank, ties.method = "first") <= 7) / ncol(probs)
+print(cor(aPosterioris, aPrioris))
+
+# Create the submission file. Take only the first 7 predictions because of the map@7 evaluation
+
+testResults <- data.frame(ncodpers = test[, ncodpers])
+testResults$added_products <- apply(probs, 2, function(col) {
   paste(names(sort(rank(-col, ties.method = "first")))[1:7], collapse=" ") })
 
-# now just create the DF from this
+submFile <- paste(data_folder,"mysubmission.csv",sep="/")
+write.csv(testResults, submFile,row.names = F, quote=F)
+
 
