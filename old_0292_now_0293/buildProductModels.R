@@ -6,6 +6,7 @@
 # https://www.kaggle.com/alexeylive/santander-product-recommendation/june-2015-customers/run/468128
 
 
+library(caret)
 source("santa2.R")
 source("metrics.R")
 
@@ -177,12 +178,12 @@ caretHyperParamSearch <- trainControl(method = "cv", number=5,
                                       classProbs = TRUE,
                                       summaryFunction = mnLogLoss,
                                       verbose=T)
-searchGrid <- expand.grid(nrounds = seq(200, 800,by=100),
-                          eta = seq(0.02, 0.08, by=0.02),
-                          max_depth = 4:7,
-                          gamma = 2,
+searchGrid <- expand.grid(nrounds = 500, #seq(200, 800,by=100),
+                          eta = 0.04, #seq(0.02, 0.08, by=0.02),
+                          max_depth = 5, # 4:7,
+                          gamma = 0:5, #2,
                           colsample_bytree = 1,
-                          min_child_weight = 1,
+                          min_child_weight = 0:5, #1,
                           subsample = 1)
 predictors <- data.matrix(train[, modelTrainFlds, with=F])
 predictors[which(is.na(predictors))] <- 99999
