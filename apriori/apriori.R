@@ -1,6 +1,8 @@
 # Kaggle Santander 2 
 # predictions without models, purely based on a priori probabilities
-# Scores 0.0183025 on LB
+# Scores 0.0183025 on LB using all months
+# ... using May and June
+# https://www.kaggle.com/operdeck/santander-product-recommendation/predictions-without-models
 
 library(data.table)
 library(fasttime)
@@ -12,7 +14,8 @@ data_colClasses <- list(character=c("ult_fec_cli_1t","indrel_1mes","conyuemp"))
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
-train <- train[, c("ncodpers","fecha_dato",productFlds), with=F]
+train <- train[fecha_dato %in% c("2015-05-28","2015-06-28","2016-04-28","2016-05-28"), 
+               c("ncodpers","fecha_dato",productFlds), with=F]
 
 train$fecha_dato <- fastPOSIXct(train$fecha_dato)
 test$fecha_dato <- fastPOSIXct(test$fecha_dato)
@@ -29,6 +32,8 @@ train <- merge(train, train, by.x=c("ncodpers","monthnr"), by.y=c("ncodpers","ne
 d1 <- as.matrix( train[, paste(productFlds, "x", sep="."), with=F])
 d2 <- as.matrix( train[, paste(productFlds, "y", sep="."), with=F])
 aPrioris <- colSums((d1 == 1) & (is.na(d2) | (d2 == 0)), na.rm = T) / colSums(!is.na(d1) & !is.na(d2)) 
+names(aPrioris) <- productFlds
+print(aPrioris)
 
 # Merge the test set with the last month from the train set so we can null out the
 # probabilities for products already owned, otherwise set them to the a priori probabilities

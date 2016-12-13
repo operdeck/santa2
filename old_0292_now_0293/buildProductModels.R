@@ -205,7 +205,11 @@ xgb.params <- list(objective = "multi:softprob",
                    eval_metric = "mlogloss", # i really want "map@7" but get errors
                    max.depth = 5,
                    num_class = length(productFlds),
-                   eta = 0.01)
+                   eta = 0.04,
+                   gamma = 2, 
+                   colsample_bytree = 1, 
+                   min_child_weight = 1,
+                   subsample = 1)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
@@ -217,24 +221,27 @@ validateMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Validate", modelTrai
                            missing=NaN, 
                            label=as.integer(train$product[train$dataset == "Validate"])-1)
 
-cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
-                    nrounds=500,
-                    nfold=5,
-                    maximize=F)
-
-cv2 <- rbindlist(list(data.frame(error.mean = cvresults[[paste("train",xgb.params[["eval_metric"]],"mean",sep=".")]],
-                                 error.std = cvresults[[paste("train",xgb.params[["eval_metric"]],"std",sep=".")]],
-                                 dataset = "train",
-                                 round = seq(1:nrow(cvresults))),
-                      data.frame(error.mean = cvresults[[paste("test",xgb.params[["eval_metric"]],"mean",sep=".")]],
-                                 error.std = cvresults[[paste("test",xgb.params[["eval_metric"]],"std",sep=".")]],
-                                 dataset = "test",
-                                 round = seq(1:nrow(cvresults)))))
-print(ggplot(cv2, aes(x=round, y=error.mean, colour=dataset, group=dataset))+
-        geom_errorbar(aes(ymin=error.mean-error.std, ymax=error.mean+error.std))+
-        ggtitle(paste("CV error", "depth", xgb.params[["max.depth"]],"eta",xgb.params[["eta"]]))+
-        geom_line(colour="black")+
-        ylab(xgb.params[["eval_metric"]]))
+do.CV <- F
+if (do.CV) {
+  cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
+                      nrounds=500,
+                      nfold=5,
+                      maximize=F)
+  
+  cv2 <- rbindlist(list(data.frame(error.mean = cvresults[[paste("train",xgb.params[["eval_metric"]],"mean",sep=".")]],
+                                   error.std = cvresults[[paste("train",xgb.params[["eval_metric"]],"std",sep=".")]],
+                                   dataset = "train",
+                                   round = seq(1:nrow(cvresults))),
+                        data.frame(error.mean = cvresults[[paste("test",xgb.params[["eval_metric"]],"mean",sep=".")]],
+                                   error.std = cvresults[[paste("test",xgb.params[["eval_metric"]],"std",sep=".")]],
+                                   dataset = "test",
+                                   round = seq(1:nrow(cvresults)))))
+  print(ggplot(cv2, aes(x=round, y=error.mean, colour=dataset, group=dataset))+
+          geom_errorbar(aes(ymin=error.mean-error.std, ymax=error.mean+error.std))+
+          ggtitle(paste("CV error", "depth", xgb.params[["max.depth"]],"eta",xgb.params[["eta"]]))+
+          geom_line(colour="black")+
+          ylab(xgb.params[["eval_metric"]]))
+}
 
 bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
                 watchlist=list(train=trainMatrix, validate=validateMatrix),
