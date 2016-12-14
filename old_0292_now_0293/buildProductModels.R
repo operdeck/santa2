@@ -179,11 +179,11 @@ caretHyperParamSearch <- trainControl(method = "cv", number=5,
                                       summaryFunction = mnLogLoss,
                                       verbose=T)
 searchGrid <- expand.grid(nrounds = 500, #seq(200, 800,by=100),
-                          eta = 0.04, #seq(0.02, 0.08, by=0.02),
-                          max_depth = 5, # 4:7,
-                          gamma = 0:5, #2,
+                          eta = seq(0.03,0.05,by=0.01), #0.04, #seq(0.02, 0.08, by=0.02),
+                          max_depth = 4:6, #5, # 4:7,
+                          gamma = c(0, 1:3), # 0:5, #2,
                           colsample_bytree = 1,
-                          min_child_weight = 0:5, #1,
+                          min_child_weight = 0:2, # 0:5, #1,
                           subsample = 1)
 predictors <- data.matrix(train[, modelTrainFlds, with=F])
 predictors[which(is.na(predictors))] <- 99999
@@ -209,7 +209,7 @@ xgb.params <- list(objective = "multi:softprob",
                    eta = 0.04,
                    gamma = 2, 
                    colsample_bytree = 1, 
-                   min_child_weight = 1,
+                   min_child_weight = 0,
                    subsample = 1)
 
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
