@@ -6,7 +6,7 @@
 # https://www.kaggle.com/alexeylive/santander-product-recommendation/june-2015-customers/run/468128
 
 
-library(caret)
+library("caret")
 source("santa2.R")
 source("metrics.R")
 
@@ -58,7 +58,7 @@ train <- train[split]
 # all <- bind_rows(train, test)
 # rm(list=c("train","test"))
 
-print(ggplot(group_by(train, dataset) %>% summarise(n = n(), pct = n()/nrow(train)), 
+print(ggplot(group_by(train, dataset) %>% dplyr::summarise(n = n(), pct = n()/nrow(train)), 
        aes(dataset,pct,label=n,fill=dataset))+
   geom_bar(stat="identity")+geom_text()+scale_y_continuous(labels=percent)+ggtitle("Data set splits"))
 
@@ -83,7 +83,7 @@ for (f in setdiff(names(train)[sapply(train, class) == "character"], c("dataset"
   test[[f]] <- factor(test[[f]], levels = lvls)
   
   # Count of factor levels - nope should do this before subsetting to specific dates
-  # grp <- data.table(group_by_(all, f) %>% summarise(n = n()))
+  # grp <- data.table(group_by_(all, f) %>% dplyr::summarise(n = n()))
   # names(grp)[2] <- paste("xf.n",f,sep=".")
   # setkeyv(grp, f)
   # setkeyv(all, f)
@@ -124,7 +124,7 @@ train <- melt(train, id.vars = setdiff(names(train), productFlds), measure.vars 
 # TODO consider plot of actions vs products replacing product distrib plot down
 # productDistributions <-
 #   group_by(train, product) %>%
-#   summarise(additions = sum(action==1, na.rm=T))
+#   dplyr::summarise(additions = sum(action==1, na.rm=T))
 # productDistributions$additions.rel <- productDistributions$additions/sum(productDistributions$additions)
 # productDistributions$dataset <- "Train"
 # productDistributions <- arrange(productDistributions, additions.rel)
@@ -140,8 +140,8 @@ cat("Train size after melting:", dim(train), "; unique persons:",uniqueAfter,fil
 
 productDistributions <-
   group_by(train, product, dataset) %>%
-  summarise(additions = n()) %>%
-  left_join(group_by(train, dataset) %>% summarise(dataset.total = n()), by="dataset") %>%
+  dplyr::summarise(additions = n()) %>%
+  left_join(group_by(train, dataset) %>% dplyr::summarise(dataset.total = n()), by="dataset") %>%
   mutate(additions.rel = additions/dataset.total) %>% 
   arrange(additions.rel)
 
@@ -154,9 +154,9 @@ print(ggplot(productDistributions,
 print("Number of product additions to number of customers",fill=T)
 cat(uniqueBefore-uniqueAfter, "bought nothing",fill=T)
 print(group_by(train, ncodpers) %>%
-        summarise(n_products = n()) %>%
+        dplyr::summarise(n_products = n()) %>%
         group_by(n_products) %>%
-        summarise(n_customers = n()))
+        dplyr::summarise(n_customers = n()))
 
 cat("Unique customers that made a purchase:",length(unique(train[,ncodpers])),fill=T)
 cat("Unique customers in train set that made a purchase:",length(unique(train[dataset=="Train",ncodpers])),fill=T)
