@@ -10,8 +10,11 @@ library(caret)
 source("santa2.R")
 source("metrics.R")
 
+do.HyperTuning <- F
+do.CV <- F
+
 # TODO: validating like this really makes no sense, need a different approach
-validationRatio <- 0.1 # Split training sample into Train and Validate
+validationRatio <- 0.01 # Split training sample into Train and Validate
 
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
@@ -174,33 +177,34 @@ test <- merge(test, aggregates, all.x=TRUE)
 modelTrainFlds <- names(train)[which(!names(train) %in% c("product","dataset",productFlds))]
 
 # Caret hyperparameter tuning
-caretHyperParamSearch <- trainControl(method = "cv", number=5, 
-                                      classProbs = TRUE,
-                                      summaryFunction = mnLogLoss,
-                                      verbose=T)
-searchGrid <- expand.grid(nrounds = 500, #seq(200, 800,by=100),
-                          eta = seq(0.03,0.05,by=0.01), #0.04, #seq(0.02, 0.08, by=0.02),
-                          max_depth = 4:6, #5, # 4:7,
-                          gamma = c(0, 1:3), # 0:5, #2,
-                          colsample_bytree = 1,
-                          min_child_weight = 0:2, # 0:5, #1,
-                          subsample = 1)
-predictors <- data.matrix(train[, modelTrainFlds, with=F])
-predictors[which(is.na(predictors))] <- 99999
+if (do.HyperTuning) {
+  caretHyperParamSearch <- trainControl(method = "cv", number=5, 
+                                        classProbs = TRUE,
+                                        summaryFunction = mnLogLoss,
+                                        verbose=T)
+  searchGrid <- expand.grid(nrounds = 500, #seq(200, 800,by=100),
+                            eta = seq(0.03,0.05,by=0.01), #0.04, #seq(0.02, 0.08, by=0.02),
+                            max_depth = 4:6, #5, # 4:7,
+                            gamma = c(0, 1:3), # 0:5, #2,
+                            colsample_bytree = 1,
+                            min_child_weight = 0:2, # 0:5, #1,
+                            subsample = 1)
+  predictors <- data.matrix(train[, modelTrainFlds, with=F])
+  predictors[which(is.na(predictors))] <- 99999
+  
+  tuningResults <-
+    train(x = predictors,
+          y = factor(train$product, levels=unique(train$product)), # some products never occur
+          method = "xgbTree",
+          metric = "logLoss",
+          maximize = F,
+          trControl = caretHyperParamSearch,
+          tuneGrid = searchGrid)
+  
+  print(tuningResults)
+  print(ggplot(tuningResults)+ggtitle("Hyperparameters"))
+}
 
-tuningResults <-
-  train(x = predictors,
-        y = factor(train$product, levels=unique(train$product)), # some products never occur
-        method = "xgbTree",
-        metric = "logLoss",
-        maximize = F,
-        trControl = caretHyperParamSearch,
-        tuneGrid = searchGrid)
-
-print(tuningResults)
-print(ggplot(tuningResults)+ggtitle("Hyperparameters"))
-
-stop()
 # Build multiclass model
 xgb.params <- list(objective = "multi:softprob",
                    eval_metric = "mlogloss", # i really want "map@7" but get errors
@@ -222,7 +226,6 @@ validateMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Validate", modelTrai
                            missing=NaN, 
                            label=as.integer(train$product[train$dataset == "Validate"])-1)
 
-do.CV <- F
 if (do.CV) {
   cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
                       nrounds=500,
