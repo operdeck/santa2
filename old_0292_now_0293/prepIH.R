@@ -12,7 +12,7 @@ train <- train[, names(train) %in% c("fecha_dato","ncodpers",productFlds), with=
 train$fecha_dato <- toMonthNr(train$fecha_dato)
 setkey(train, fecha_dato, ncodpers)
 
-# TODO: consider more months
+
 # TODO: consider not only product fields but also a (selected) few others
 
 # Aggregate: last months portfolio and size of portfolio
@@ -29,6 +29,13 @@ setnames(lag.M2, productFlds, paste("lag.M2",productFlds,sep="."))
 setkeyv(lag.M2, key(train))
 interactionAggregates <- merge(interactionAggregates, lag.M2, all.x=TRUE)
 
+lag.M3 <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-2), ]
+lag.M3$fecha_dato <- lag.M3$fecha_dato+2
+lag.M3[ , lag.M3.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
+setnames(lag.M3, productFlds, paste("lag.M3",productFlds,sep="."))
+setkeyv(lag.M3, key(train))
+interactionAggregates <- merge(interactionAggregates, lag.M3, all.x=TRUE)
+
 lag.M4 <- train[fecha_dato %in% (c(trainDateNr,testDateNr)-4), ]
 lag.M4$fecha_dato <- lag.M4$fecha_dato+4
 lag.M4[ , lag.M4.portfolio.size := rowSums(.SD == 0, na.rm=T), .SDcols = productFlds]
@@ -36,7 +43,14 @@ setnames(lag.M4, productFlds, paste("lag.M4",productFlds,sep="."))
 setkeyv(lag.M4, key(train))
 interactionAggregates <- merge(interactionAggregates, lag.M4, all.x=TRUE)
 
-# TODO: consider trend variables (M1 vs M4 etc)
+interactionAggregates[["lag.portfolio.maxchange"]] <- 
+  abs(pmin(interactionAggregates$lag.M4.portfolio.size, interactionAggregates$lag.M3.portfolio.size, interactionAggregates$lag.M2.portfolio.size, interactionAggregates$lag.M1.portfolio.size, na.rm=T) -
+        pmax(interactionAggregates$lag.M4.portfolio.size, interactionAggregates$lag.M3.portfolio.size, interactionAggregates$lag.M2.portfolio.size, interactionAggregates$lag.M1.portfolio.size, na.rm=T))
+interactionAggregates[["lag.portfolio.avgsize"]] <- 
+  (interactionAggregates$lag.M4.portfolio.size + interactionAggregates$lag.M3.portfolio.size + interactionAggregates$lag.M2.portfolio.size + interactionAggregates$lag.M1.portfolio.size)/4
+interactionAggregates[["lag.portfolio.difftomean"]] <- 
+  (interactionAggregates$lag.M4.portfolio.size + interactionAggregates$lag.M3.portfolio.size + interactionAggregates$lag.M2.portfolio.size + interactionAggregates$lag.M1.portfolio.size)/4 -
+  mean(c(interactionAggregates$lag.M4.portfolio.size, interactionAggregates$lag.M3.portfolio.size, interactionAggregates$lag.M2.portfolio.size, interactionAggregates$lag.M1.portfolio.size), na.rm=T)
 
 print(ggplot(gather(select(interactionAggregates, ends_with(".portfolio.size")), lag, size), 
              aes(size, fill=factor(lag)))+
@@ -45,11 +59,12 @@ print(ggplot(gather(select(interactionAggregates, ends_with(".portfolio.size")),
 print(unique(train$fecha_dato))
 
 # Set outcome by subtracting last month portfolio
-train2 <- train
-train2$fecha_dato <- train2$fecha_dato+1
-setkey(train2, fecha_dato, ncodpers)
-train <- merge(train, train2, all=FALSE) # left merge(X, Y, all.x=TRUE)
-rm(train2)
+train$next_month <- train$fecha_dato+1
+train <- merge(train, train[, c("ncodpers", "next_month", productFlds), with=F], 
+               all.x=F, all.y=F, 
+               by.x = c("ncodpers", "fecha_dato"),
+               by.y = c("ncodpers", "next_month")) # inner self join - only target date will remain
+train[, next_month := NULL]
 
 print("Date range:")
 print(unique(train$fecha_dato)) # first month will be gone
