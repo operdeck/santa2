@@ -6,7 +6,7 @@
 # https://www.kaggle.com/alexeylive/santander-product-recommendation/june-2015-customers/run/468128
 
 
-library(caret)
+library("caret")
 source("santa2.R")
 source("metrics.R")
 
@@ -61,9 +61,9 @@ train <- train[split]
 # all <- bind_rows(train, test)
 # rm(list=c("train","test"))
 
-print(ggplot(group_by(train, dataset) %>% summarise(n = n(), pct = n()/nrow(train)), 
-       aes(dataset,pct,label=n,fill=dataset))+
-  geom_bar(stat="identity")+geom_text()+scale_y_continuous(labels=percent)+ggtitle("Data set splits"))
+print(ggplot(group_by(train, dataset) %>% dplyr::summarise(n = n(), pct = n()/nrow(train)), 
+             aes(dataset,pct,label=n,fill=dataset))+
+        geom_bar(stat="identity")+geom_text()+scale_y_continuous(labels=percent)+ggtitle("Data set splits"))
 
 # Dates
 
@@ -127,7 +127,7 @@ train <- melt(train, id.vars = setdiff(names(train), productFlds), measure.vars 
 # TODO consider plot of actions vs products replacing product distrib plot down
 # productDistributions <-
 #   group_by(train, product) %>%
-#   summarise(additions = sum(action==1, na.rm=T))
+#   dplyr::summarise(additions = sum(action==1, na.rm=T))
 # productDistributions$additions.rel <- productDistributions$additions/sum(productDistributions$additions)
 # productDistributions$dataset <- "Train"
 # productDistributions <- arrange(productDistributions, additions.rel)
@@ -143,23 +143,23 @@ cat("Train size after melting:", dim(train), "; unique persons:",uniqueAfter,fil
 
 productDistributions <-
   group_by(train, product, dataset) %>%
-  summarise(additions = n()) %>%
-  left_join(group_by(train, dataset) %>% summarise(dataset.total = n()), by="dataset") %>%
+  dplyr::summarise(additions = n()) %>%
+  left_join(group_by(train, dataset) %>% dplyr::summarise(dataset.total = n()), by="dataset") %>%
   mutate(additions.rel = additions/dataset.total) %>% 
   arrange(additions.rel)
 
 print(ggplot(productDistributions, 
-       aes(factor(product, levels=unique(productDistributions$product)),additions.rel,fill=dataset))+
-  geom_bar(stat="identity",position="dodge")+coord_flip()+
-  scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
-    xlab("product")+ylab("Added"))
+             aes(factor(product, levels=unique(productDistributions$product)),additions.rel,fill=dataset))+
+        geom_bar(stat="identity",position="dodge")+coord_flip()+
+        scale_y_continuous(labels = percent)+ggtitle("Additions by product")+
+        xlab("product")+ylab("Added"))
 
 print("Number of product additions to number of customers",fill=T)
 cat(uniqueBefore-uniqueAfter, "bought nothing",fill=T)
 print(group_by(train, ncodpers) %>%
         summarise(n_products = n()) %>%
         group_by(n_products) %>%
-        summarise(n_customers = n()))
+        dplyr::summarise(n_customers = n()))
 
 cat("Unique customers that made a purchase:",length(unique(train[,ncodpers])),fill=T)
 cat("Unique customers in train set that made a purchase:",length(unique(train[dataset=="Train",ncodpers])),fill=T)
@@ -223,8 +223,8 @@ trainMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Train", modelTrainFlds,
                            missing=NaN, 
                            label=as.integer(train$product[train$dataset == "Train"])-1)
 validateMatrix <- xgb.DMatrix(data.matrix(train[dataset == "Validate", modelTrainFlds, with=F]), 
-                           missing=NaN, 
-                           label=as.integer(train$product[train$dataset == "Validate"])-1)
+                              missing=NaN, 
+                              label=as.integer(train$product[train$dataset == "Validate"])-1)
 
 if (do.CV) {
   cvresults <- xgb.cv(params=xgb.params, data = trainMatrix, missing=NaN,
@@ -312,8 +312,8 @@ write.csv(testResults, submFile,row.names = F, quote=F)
 
 # Get validation set back into original 'wide' format
 validationTruth <- spread(mutate(train[dataset == "Validate", 
-                     c("fecha_dato","ncodpers","product"), with=F], value=1),
-       product, value, fill=0)
+                                       c("fecha_dato","ncodpers","product"), with=F], value=1),
+                          product, value, fill=0)
 for (f in setdiff(productFlds,names(validationTruth))) {
   validationTruth[[f]] <- 0
 }
