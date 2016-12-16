@@ -35,10 +35,10 @@ tstNCODPRS <- c(15889, # no birthday,
 
 if (do.testSetOnly) {
   train <- train[ncodpers %in% tstNCODPRS,]
+  test <- test[ncodpers %in% tstNCODPRS,]
 }
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
-# TODO: consider truncating train set to test customers
 # Test and train summaries are very similar
 # All of test ncodpers are in train. Almost all of train are in test.
 # cat("Unique train customers",length(unique(train$ncodpers)),fill=T)
@@ -70,11 +70,11 @@ for(f in intersect(data_dateFlds, names(train))) {
 }
 dateCombos <- combn(intersect(data_dateFlds, names(train)),2)
 for(i in 1:ncol(dateCombos)) {
-  train[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- train[[dateCombos[1,i]]] - train[[dateCombos[2,i]]]
-  test[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep="_") ]] <- test[[dateCombos[1,i]]] - test[[dateCombos[2,i]]]
+  train[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep=".") ]] <- train[[dateCombos[1,i]]] - train[[dateCombos[2,i]]]
+  test[[ paste("diff",dateCombos[1,i],dateCombos[2,i],sep=".") ]] <- test[[dateCombos[1,i]]] - test[[dateCombos[2,i]]]
 }
 
-# This field antiguedad is not set consistently. It is the same (+/- 1) as diff_fecha_dato_fecha_alta anyway.
+# This field antiguedad is not set consistently. It is the same (+/- 1) as diff.fecha_dato_fecha_alta anyway.
 train[["antiguedad"]] <- NULL
 test[["antiguedad"]] <- NULL
 
@@ -107,7 +107,7 @@ train <- merge(train, birthdays, all.x=T)
 age_in_months <- train$age.months.at.abirthday + train$fecha_dato - train$date.at.abirthday
 train$age <- ifelse(is.na(age_in_months), train$age, age_in_months %/% 12)
 train$is.birthday <- (age_in_months %% 12)==0
-train$months.to.18.bday <- abs(12*18 - age_in_months)
+train$months.to.18.bday <- 12*18 - age_in_months
 train[, date.at.abirthday := NULL]
 train[, age.months.at.abirthday := NULL]
 
@@ -115,7 +115,7 @@ test <- merge(test, birthdays, all.x=T)
 age_in_months <- test$age.months.at.abirthday + test$fecha_dato - test$date.at.abirthday
 test$age <- ifelse(is.na(age_in_months), test$age, age_in_months %/% 12)
 test$is.birthday <- (age_in_months %% 12)==0
-test$months.to.18.bday <- abs(12*18 - age_in_months)
+test$months.to.18.bday <- 12*18 - age_in_months
 test[, date.at.abirthday := NULL]
 test[, age.months.at.abirthday := NULL]
 
@@ -139,28 +139,120 @@ for (f in names(train)[sapply(train, class) == "character"]) {
 
 # Remaining fields to numerics - not needed, data.matrix will do that
 
-# Replace portfolio by the portfolio difference of this and previous month; this is the outcome
-# First self-merge with the previous month
+# Get the purchases (= outcomes) as the diff between portfolio this and previous month
+
 train$next_month <- train$fecha_dato+1
 train <- merge(train, train[, c("ncodpers", "next_month", productFlds), with=F], 
                all.x=F, all.y=F, 
                by.x = c("ncodpers", "fecha_dato"),
-               by.y = c("ncodpers", "next_month")) # inner self join - only target date will remain
-train[, next_month := NULL]
+               by.y = c("ncodpers", "next_month"),
+               suffixes = c("", ".prev")) # inner self join
 for (f in productFlds) {
-  train[[f]] <- ifelse(is.na(train[[paste(f,"y",sep=".")]]),
-                       train[[paste(f,"x",sep=".")]],
-                       train[[paste(f,"x",sep=".")]] - train[[paste(f,"y",sep=".")]])
-  train[[paste(f,"x",sep=".")]] <- NULL
-  train[[paste(f,"y",sep=".")]] <- NULL
+  train[[paste("outcome",f,sep=".")]] <- 
+    ifelse(is.na(train[[paste(f,"prev",sep=".")]]), train[[f]], train[[f]] - train[[paste(f,"prev",sep=".")]])
+  train[[paste(f,"prev",sep=".")]] <- NULL
 }
 
-# Only now subset to the train month
+# Portfolio size / other derived vars here
+train[ , outcome.portfolio.size := rowSums(.SD, na.rm=T), .SDcols = productFlds]
+train[ , outcome.purchased.size := rowSums(.SD==1, na.rm=T), .SDcols = paste("outcome",productFlds,sep=".")]
+
+# "outcome."productFlds are the purchases - the outcomes
+# productFlds is *current* portfolio - to be dropped from predictor set
+
+# Add lags of 1-4 months back to both train & test set
+
+lagFields <- setdiff(names(train), 
+                     c(data_dateFlds, 
+                       "ncodpers", "fecha_dato", "next_month",
+                       names(train)[startsWith(names(train), "diff.")],
+                       "is.birthday", "months.to.18.bday"))
+
+lagDur <- seq(1:4)
+lagInd <- paste("M",lagDur,sep="")
+for (lag in lagDur) {
+  cat("Adding lag fields for lag", lag, fill=T)
+  
+  train$next_month <- train$fecha_dato+lag
+  train <- merge(train, train[, c("ncodpers", "next_month", lagFields), with=F], 
+                 all.x=T, all.y=F, 
+                 by.x = c("ncodpers", "fecha_dato"),
+                 by.y = c("ncodpers", "next_month"),
+                 suffixes = c("", paste(".M", lag, sep=""))) # left join
+  
+  xtraLagFieldsInTest <- setdiff(lagFields, names(test))
+  test <- merge(test, train[, c("ncodpers", "next_month", lagFields), with=F], 
+                 all.x=T, all.y=F, 
+                 by.x = c("ncodpers", "fecha_dato"),
+                 by.y = c("ncodpers", "next_month"),
+                 suffixes = c("", paste(".M", lag, sep=""))) # left join
+  setnames(test, xtraLagFieldsInTest, paste(xtraLagFieldsInTest, paste("M", lag, sep=""), sep="."))
+}
+
+train[, next_month := NULL]
+
+for (f in productFlds) {
+  cat("Adding aggregates for lagged fields for",f,fill=T)
+  
+  # Nr of purchases
+  train[ , greatnewfield := rowSums(.SD == 1, na.rm=T), .SDcols = paste("outcome", f, lagInd, sep=".")]
+  setnames(train, "greatnewfield", paste("sum.purchased", f, sep="."))
+  test[ , greatnewfield := rowSums(.SD == 1, na.rm=T), .SDcols = paste("outcome", f, lagInd, sep=".")]
+  setnames(test, "greatnewfield", paste("sum.purchased", f, sep="."))
+  
+  # Changes
+  train[, c(paste("changes", f, sep=".")) :=
+    (train[[paste(f, "M1", sep=".")]] != train[[paste(f, "M2", sep=".")]]) +
+    (train[[paste(f, "M2", sep=".")]] != train[[paste(f, "M3", sep=".")]]) +
+    (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
+  
+  test[, c(paste("changes", f, sep=".")) :=
+    (test[[paste(f, "M1", sep=".")]] != test[[paste(f, "M2", sep=".")]]) +
+    (test[[paste(f, "M2", sep=".")]] != test[[paste(f, "M3", sep=".")]]) +
+    (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
+  
+  train[, paste("outcome", f, lagInd, sep=".") := NULL]
+  test[, paste("outcome", f, lagInd, sep=".") := NULL]
+  train[, paste(f, lagInd, sep=".") := NULL]
+  test[, paste(f, lagInd, sep=".") := NULL]
+}
+
+for (f in setdiff(lagFields, 
+                  c(names(train)[startsWith(names(train), "outcome.")], productFlds, paste("outcome", productFlds, sep=".")))) {
+  cat("Adding aggregates for lagged fields for",f,fill=T)
+  
+  train[, c(paste("changes", f, sep=".")) :=
+          (train[[paste(f, "M1", sep=".")]] != train[[paste(f, "M2", sep=".")]]) +
+          (train[[paste(f, "M2", sep=".")]] != train[[paste(f, "M3", sep=".")]]) +
+          (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
+  
+  test[, c(paste("changes", f, sep=".")) :=
+         (test[[paste(f, "M1", sep=".")]] != test[[paste(f, "M2", sep=".")]]) +
+         (test[[paste(f, "M2", sep=".")]] != test[[paste(f, "M3", sep=".")]]) +
+         (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
+
+  train[, paste(f, lagInd, sep=".") := NULL]
+  test[, paste(f, lagInd, sep=".") := NULL]
+}
+
+# TODO maybe trending like M1 > M4 etc?
+
+
+# Only now subset to the train month !!
+
 train <- train[fecha_dato == trainDateNr,]
+
+# Drop the current month portfolio (won't exist in train set...) and rename the outcomes
+for (f in productFlds) {
+  train[[f]] <- NULL
+}
+setnames(train, paste("outcome", productFlds, sep="."), productFlds)
 
 uniqueBefore <- length(unique(train$ncodpers))
 cat("Train size before melting:", dim(train), "; unique persons:",uniqueBefore,fill = T)
-train <- melt(train, id.vars = setdiff(names(train), productFlds), measure.vars = productFlds,
+train <- melt(train, 
+              id.vars = setdiff(names(train), productFlds), 
+              measure.vars = productFlds,
               variable.name = "product", value.name = "action")
 
 train <- train[action == 1,] # only keep the additions
@@ -193,17 +285,9 @@ print(ggplot(nProductsByCusts, aes(x=factor(n_products), y=n_customers, label=n_
         scale_y_log10()+
         ggtitle("How many people bought how many products?"))
 
-# Join in extra fields
-
-aggregates <- fread(paste(data_folder,"interactionAggregates.csv",sep="/"))
-setkey(train, fecha_dato, ncodpers)
-setkey(test, fecha_dato, ncodpers)
-setkey(aggregates, fecha_dato, ncodpers)
-train <- merge(train, aggregates, all.x=TRUE)
-test <- merge(test, aggregates, all.x=TRUE)
-
 # Model building
-modelTrainFlds <- names(train)[which(!names(train) %in% c("product", productFlds))]
+predictorFlds <- names(train)[which((!names(train) %in% c("product", productFlds)) &
+                                       !startsWith(names(train),"outcome."))]
 
 # TODO consider to exclude these
 # # Based on plots, drop these
@@ -224,7 +308,7 @@ if (do.HyperTuning) {
                             colsample_bytree = 1,
                             min_child_weight = 0:2, # 0:5, #1,
                             subsample = 1)
-  predictors <- data.matrix(train[, modelTrainFlds, with=F])
+  predictors <- data.matrix(train[, predictorFlds, with=F])
   predictors[which(is.na(predictors))] <- 99999
   
   tuningResults <-
@@ -254,7 +338,7 @@ xgb.params <- list(objective = "multi:softprob",
 # See https://github.com/dmlc/xgboost/blob/master/R-package/demo/custom_objective.R 
 # for custom error function
 
-trainMatrix <- xgb.DMatrix(data.matrix(train[, modelTrainFlds, with=F]), 
+trainMatrix <- xgb.DMatrix(data.matrix(train[, predictorFlds, with=F]), 
                            missing=NaN, 
                            label=as.integer(train$product)-1)
 if (do.CV) {
@@ -285,7 +369,7 @@ bst = xgb.train(params=xgb.params, data = trainMatrix, missing=NaN,
 
 # Compute & plot feature importance matrix & summary tree
 print("Feature importance matrix...")
-importance_matrix <- xgb.importance(modelTrainFlds, model = bst)
+importance_matrix <- xgb.importance(predictorFlds, model = bst)
 print(importance_matrix)
 print(xgb.plot.importance(head(importance_matrix, min(20, nrow(importance_matrix)))))
 
@@ -303,7 +387,7 @@ trainProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=nrow(trai
 colnames(trainProbabilities) <- productFlds
 
 print("Test predictions...")
-testMatrix <- xgb.DMatrix(data.matrix(test[, modelTrainFlds, with=F]), missing=NaN)
+testMatrix <- xgb.DMatrix(data.matrix(test[, predictorFlds, with=F]), missing=NaN)
 xgbpred <- predict(bst, testMatrix, missing=NaN)
 testProbabilities <- t(matrix(xgbpred, nrow=length(productFlds), ncol=nrow(test)))
 colnames(testProbabilities) <- productFlds
