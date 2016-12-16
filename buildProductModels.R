@@ -14,7 +14,7 @@ do.CV <- F
 do.testSetOnly <- F # when F it will score the test set
 cv.nfold <- 5
 cv.rounds <- 500
-xgb.rounds <- 500
+xgb.rounds <- 50
 
 train <- fread(paste(data_folder,"train_ver2.csv",sep="/"), colClasses = data_colClasses)
 test <- fread(paste(data_folder,"test_ver2.csv",sep="/"), colClasses = data_colClasses)
@@ -27,6 +27,8 @@ tstNCODPRS <- c(15889, # no birthday,
                 1170604, # 1 different purchase
                 1170632) # multiple purchases
 
+tstNCODPRS <- head(train$ncodpers, 10000)
+
 # TODO: consider this to force probs to 0 for products already in portfolio 1 m before test
 # set aside outcomes of 1 month before test set
 # testPrevPortfolio <- train[fecha_dato == testDatePrev, 
@@ -35,7 +37,7 @@ tstNCODPRS <- c(15889, # no birthday,
 
 if (do.testSetOnly) {
   train <- train[ncodpers %in% tstNCODPRS,]
-  test <- test[ncodpers %in% tstNCODPRS,]
+  # test <- test[ncodpers %in% tstNCODPRS,]
 }
 productFlds <- names(train)[grepl("^ind_.*ult1$",names(train))] # products purchased
 
@@ -64,6 +66,7 @@ print(ggplot(rbindlist(list(group_by(train, fecha_dato) %>%
 
 # Dates
 
+print("Dates")
 for(f in intersect(data_dateFlds, names(train))) { 
   train[[f]] <- toMonthNr(train[[f]])
   test[[f]] <- toMonthNr(test[[f]])
@@ -141,6 +144,8 @@ for (f in names(train)[sapply(train, class) == "character"]) {
 
 # Get the purchases (= outcomes) as the diff between portfolio this and previous month
 
+print("Purchases")
+
 train$next_month <- train$fecha_dato+1
 train <- merge(train, train[, c("ncodpers", "next_month", productFlds), with=F], 
                all.x=F, all.y=F, 
@@ -153,6 +158,10 @@ for (f in productFlds) {
   train[[paste(f,"prev",sep=".")]] <- NULL
 }
 
+# Subset to only the months before the train date or equal nr of months before the test date
+train <- train[(fecha_dato <= trainDateNr) | 
+                 (fecha_dato >= testDateNr - (trainDateNr - min(train$fecha_dato))), ]
+
 # Portfolio size / other derived vars here
 train[ , outcome.portfolio.size := rowSums(.SD, na.rm=T), .SDcols = productFlds]
 train[ , outcome.purchased.size := rowSums(.SD==1, na.rm=T), .SDcols = paste("outcome",productFlds,sep=".")]
@@ -161,92 +170,120 @@ train[ , outcome.purchased.size := rowSums(.SD==1, na.rm=T), .SDcols = paste("ou
 # productFlds is *current* portfolio - to be dropped from predictor set
 
 # Add lags of 1-4 months back to both train & test set
-
+# Exclude date like fields
 lagFields <- setdiff(names(train), 
                      c(data_dateFlds, 
                        "ncodpers", "fecha_dato", "next_month",
                        names(train)[startsWith(names(train), "diff.")],
-                       "is.birthday", "months.to.18.bday"))
+                       "is.birthday", "months.to.18.bday",
+                       "pais_residencia",
+                       "sexo"))
+lagFieldsOutcome <- c(names(train)[startsWith(names(train), "outcome.")], productFlds)
 
 lagDur <- seq(1:4)
 lagInd <- paste("M",lagDur,sep="")
-for (lag in lagDur) {
-  cat("Adding lag fields for lag", lag, fill=T)
-  
-  train$next_month <- train$fecha_dato+lag
-  train <- merge(train, train[, c("ncodpers", "next_month", lagFields), with=F], 
-                 all.x=T, all.y=F, 
-                 by.x = c("ncodpers", "fecha_dato"),
-                 by.y = c("ncodpers", "next_month"),
-                 suffixes = c("", paste(".M", lag, sep=""))) # left join
-  
-  xtraLagFieldsInTest <- setdiff(lagFields, names(test))
-  test <- merge(test, train[, c("ncodpers", "next_month", lagFields), with=F], 
-                 all.x=T, all.y=F, 
-                 by.x = c("ncodpers", "fecha_dato"),
-                 by.y = c("ncodpers", "next_month"),
-                 suffixes = c("", paste(".M", lag, sep=""))) # left join
-  setnames(test, xtraLagFieldsInTest, paste(xtraLagFieldsInTest, paste("M", lag, sep=""), sep="."))
-}
 
+for (f in lagFields) {
+  isOutcomeField <- f %in% lagFieldsOutcome
+  cat("Adding lag aggregates for", f, "(", which(f==lagFields), "/", length(lagFields), 
+      ifelse(isOutcomeField, "(product)", "(customer)"), fill=T)
+
+  for (lag in lagDur) {
+    cat("   lag", lag, fill=T)
+    
+    train$next_month <- train$fecha_dato+lag
+    train <- merge(train, train[, c("ncodpers", "next_month", f), with=F], 
+                   all.x=T, all.y=F, 
+                   by.x = c("ncodpers", "fecha_dato"),
+                   by.y = c("ncodpers", "next_month"),
+                   suffixes = c("", paste(".M", lag, sep=""))) # left join
+    
+    preExisted <- (f %in% names(test))
+    test <- merge(test, train[, c("ncodpers", "next_month", f), with=F], 
+                  all.x=T, all.y=F, 
+                  by.x = c("ncodpers", "fecha_dato"),
+                  by.y = c("ncodpers", "next_month"),
+                  suffixes = c("", paste(".M", lag, sep=""))) # left join
+    if (!preExisted) {
+      setnames(test, f, paste(f, paste("M", lag, sep=""), sep="."))
+    }
+  }
+
+  if (isOutcomeField) {
+    # Nr of purchases
+    train[, greatnewfield := rowSums(.SD == 1, na.rm=T), .SDcols = paste(f, lagInd, sep=".")]
+    setnames(train, "greatnewfield", paste("sum", f, sep="."))
+    test[ , greatnewfield := rowSums(.SD == 1, na.rm=T), .SDcols = paste(f, lagInd, sep=".")]
+    setnames(test, "greatnewfield", paste("sum", f, sep="."))
+
+    train[, c(paste("nchanges", f, sep=".")) :=
+            (train[[paste(f, "M1", sep=".")]] != train[[paste(f, "M2", sep=".")]]) +
+            (train[[paste(f, "M2", sep=".")]] != train[[paste(f, "M3", sep=".")]]) +
+            (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
+    test[, c(paste("nchanges", f, sep=".")) :=
+           (test[[paste(f, "M1", sep=".")]] != test[[paste(f, "M2", sep=".")]]) +
+           (test[[paste(f, "M2", sep=".")]] != test[[paste(f, "M3", sep=".")]]) +
+           (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
+    
+    train[, c(paste("trending", f, sep=".")) :=
+            (train[[paste(f, "M1", sep=".")]] + train[[paste(f, "M2", sep=".")]]) >
+            (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
+    test[, c(paste("trending", f, sep=".")) :=
+            (test[[paste(f, "M1", sep=".")]] + test[[paste(f, "M2", sep=".")]]) >
+            (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
+  } else {
+    train[, c(paste("nchanges", f, sep=".")) :=
+            (train[[f]] != train[[paste(f, "M1", sep=".")]]) +
+            (train[[paste(f, "M1", sep=".")]] != train[[paste(f, "M2", sep=".")]]) +
+            (train[[paste(f, "M2", sep=".")]] != train[[paste(f, "M3", sep=".")]]) +
+            (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
+    test[, c(paste("nchanges", f, sep=".")) :=
+            (test[[f]] != test[[paste(f, "M1", sep=".")]]) +
+            (test[[paste(f, "M1", sep=".")]] != test[[paste(f, "M2", sep=".")]]) +
+            (test[[paste(f, "M2", sep=".")]] != test[[paste(f, "M3", sep=".")]]) +
+            (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
+    
+    if (is.numeric(train[[f]])) {
+      train[, c(paste("trending", f, sep=".")) :=
+              train[[f]] > (train[[paste(f, "M1", sep=".")]] + 
+                              train[[paste(f, "M2", sep=".")]] +
+                              train[[paste(f, "M3", sep=".")]] + 
+                              train[[paste(f, "M4", sep=".")]])/4]
+      test[, c(paste("trending", f, sep=".")) :=
+              test[[f]] > (test[[paste(f, "M1", sep=".")]] + 
+                              test[[paste(f, "M2", sep=".")]] +
+                              test[[paste(f, "M3", sep=".")]] + 
+                              test[[paste(f, "M4", sep=".")]])/4]
+    }
+  }
+
+  if (f %in% productFlds) {
+    # Keep M1 of the portfolio as this is the best predictor
+    cat("Dropping",paste(f, paste("M",2:4,sep=""), sep="."),fill=T)  
+    train[, paste(f, paste("M",2:4,sep=""), sep=".") := NULL]
+    test[, paste(f, paste("M",2:4,sep=""), sep=".") := NULL]
+  } else {
+    cat("Dropping",paste(f, lagInd, sep="."),fill=T)  
+    train[, paste(f, lagInd, sep=".") := NULL]
+    test[, paste(f, lagInd, sep=".") := NULL]
+  }
+}
 train[, next_month := NULL]
 
-for (f in productFlds) {
-  cat("Adding aggregates for lagged fields for",f,fill=T)
-  
-  # Nr of purchases
-  train[ , greatnewfield := rowSums(.SD == 1, na.rm=T), .SDcols = paste("outcome", f, lagInd, sep=".")]
-  setnames(train, "greatnewfield", paste("sum.purchased", f, sep="."))
-  test[ , greatnewfield := rowSums(.SD == 1, na.rm=T), .SDcols = paste("outcome", f, lagInd, sep=".")]
-  setnames(test, "greatnewfield", paste("sum.purchased", f, sep="."))
-  
-  # Changes
-  train[, c(paste("changes", f, sep=".")) :=
-    (train[[paste(f, "M1", sep=".")]] != train[[paste(f, "M2", sep=".")]]) +
-    (train[[paste(f, "M2", sep=".")]] != train[[paste(f, "M3", sep=".")]]) +
-    (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
-  
-  test[, c(paste("changes", f, sep=".")) :=
-    (test[[paste(f, "M1", sep=".")]] != test[[paste(f, "M2", sep=".")]]) +
-    (test[[paste(f, "M2", sep=".")]] != test[[paste(f, "M3", sep=".")]]) +
-    (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
-  
-  train[, paste("outcome", f, lagInd, sep=".") := NULL]
-  test[, paste("outcome", f, lagInd, sep=".") := NULL]
-  train[, paste(f, lagInd, sep=".") := NULL]
-  test[, paste(f, lagInd, sep=".") := NULL]
-}
-
-for (f in setdiff(lagFields, 
-                  c(names(train)[startsWith(names(train), "outcome.")], productFlds, paste("outcome", productFlds, sep=".")))) {
-  cat("Adding aggregates for lagged fields for",f,fill=T)
-  
-  train[, c(paste("changes", f, sep=".")) :=
-          (train[[paste(f, "M1", sep=".")]] != train[[paste(f, "M2", sep=".")]]) +
-          (train[[paste(f, "M2", sep=".")]] != train[[paste(f, "M3", sep=".")]]) +
-          (train[[paste(f, "M3", sep=".")]] != train[[paste(f, "M4", sep=".")]])]
-  
-  test[, c(paste("changes", f, sep=".")) :=
-         (test[[paste(f, "M1", sep=".")]] != test[[paste(f, "M2", sep=".")]]) +
-         (test[[paste(f, "M2", sep=".")]] != test[[paste(f, "M3", sep=".")]]) +
-         (test[[paste(f, "M3", sep=".")]] != test[[paste(f, "M4", sep=".")]])]
-
-  train[, paste(f, lagInd, sep=".") := NULL]
-  test[, paste(f, lagInd, sep=".") := NULL]
-}
-
-# TODO maybe trending like M1 > M4 etc?
-
-
-# Only now subset to the train month !!
+# Then now subset to the single train month
 
 train <- train[fecha_dato == trainDateNr,]
 
+# for (f in names(train)[startsWith(names(train), "nchanges.")]) {
+#   if ((is.na(max(train[[f]], na.rm=T)) & is.na(min(train[[f]], na.rm=T))) | (max(train[[f]], na.rm = T) == min(train[[f]], na.rm = T))) {
+#     print(f)
+#   }
+# }
+ 
 # Drop the current month portfolio (won't exist in train set...) and rename the outcomes
-for (f in productFlds) {
-  train[[f]] <- NULL
-}
+train[, c(productFlds) := NULL]
 setnames(train, paste("outcome", productFlds, sep="."), productFlds)
+train[, names(train)[startsWith(names(train),"outcome")] := NULL]
 
 uniqueBefore <- length(unique(train$ncodpers))
 cat("Train size before melting:", dim(train), "; unique persons:",uniqueBefore,fill = T)
