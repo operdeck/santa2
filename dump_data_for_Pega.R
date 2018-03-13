@@ -147,29 +147,30 @@ cat("IH interactions for the mid-size set:",nrow(interactionsIHStyle[CustomerID 
 
 print("Test set")
 
+# This is to help identify customers/snapshots where 1 or more products were added and/or removed at the same time
+additions[, nAdditions := rowSums(.SD==1), .SDcols=names(additions)[grepl("ind.*", names(additions))]]
+additions[, nRemovals := rowSums(.SD==-1), .SDcols=names(additions)[grepl("ind.*", names(additions))]]
+
+# This is to help find active customers
 setkey(additions, CustomerID)
-customerSummary <- additions[, list(nAdditions=sum(.SD==1)), 
-                             by=c("CustomerID"), 
-                             .SDcols=names(additions)[grepl("ind.*", names(additions))]]
+customerSummary <- additions[, list(nAdditions=sum(nAdditions), nRemovals=sum(nRemovals)), by=c("CustomerID")]
 
-activeCustomers <- sort(sample( customerSummary[ nAdditions > 1, ]$CustomerID, 10 ))
+testSetCustomers <- sort(sample( customerSummary[ nAdditions > 1, ]$CustomerID, 10 ))
 
-cat("These customers added one or more products over time:", activeCustomers, fill=T)
-testAdditionsOverview <- additions[CustomerID %in% activeCustomers, list(nAdditions=sum(.SD==1)), 
-                                   by=c("CustomerID","Snapshot"), 
-                                   .SDcols=names(additions)[grepl("ind.*", names(additions))]] %>% spread(Snapshot, nAdditions, fill=0)
+cat("These customers added one or more products over time:", testSetCustomers, fill=T)
+testAdditionsOverview <- additions[CustomerID %in% testSetCustomers] %>% select(CustomerID, Snapshot, nAdditions) %>% filter(nAdditions>0) %>% spread(Snapshot, nAdditions, fill=0)
 testAdditionsOverview$`Sum5-16` <- rowSums(testAdditionsOverview[, which(names(testAdditionsOverview) %in% as.character(seq(from=5,to=16))), with=F])
 testAdditionsOverview$`Sum12-16` <- rowSums(testAdditionsOverview[, which(names(testAdditionsOverview) %in% as.character(seq(from=12,to=16))), with=F])
 testAdditionsOverview$`Sum-All` <- rowSums(testAdditionsOverview[, which(names(testAdditionsOverview) %in% as.character(seq(from=1,to=18))), with=F])
 print(testAdditionsOverview)
 
-print(interactionsIHStyle[CustomerID %in% activeCustomers & Outcome==1])
+print(interactionsIHStyle[CustomerID %in% testSetCustomers & Outcome==1])
 
-write.csv(portfolio[CustomerID %in% activeCustomers, c("CustomerID", "Snapshot")], 
+write.csv(portfolio[CustomerID %in% testSetCustomers, c("CustomerID", "Snapshot")], 
           paste(data_folder,"santa_snapshots-small.csv",sep="/"), row.names=F)
-cat("Nr of test records:", nrow(portfolio[CustomerID %in% activeCustomers]), fill=T)
-cat("Nr of additions in the test set:", sum(additions[CustomerID %in% activeCustomers] == 1), fill=T)
-cat("IH interactions for the test set:",nrow(interactionsIHStyle[CustomerID %in% activeCustomers]),"additions only:",nrow(interactionsIHStyle[CustomerID %in% activeCustomers & Outcome==1]),fill=T)
+cat("Nr of test records:", nrow(portfolio[CustomerID %in% testSetCustomers]), fill=T)
+cat("Nr of additions in the test set:", sum(additions[CustomerID %in% testSetCustomers] == 1), fill=T)
+cat("IH interactions for the test set:",nrow(interactionsIHStyle[CustomerID %in% testSetCustomers]),"additions only:",nrow(interactionsIHStyle[CustomerID %in% testSetCustomers & Outcome==1]),fill=T)
 
 print("Finding subsequent additions")
 additionsTall <- interactionsIHStyle[Outcome == 1]
