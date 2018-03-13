@@ -10,18 +10,18 @@
 # - santa_profile   : the customer profile at that moment
 # - santa_interactionsIHStyle : just the customer additions/removals in "tall" format: customer ID / time / product / action suitable for IH insertion
 #
-# These need to be uploaded to PRPC in the corresponding file datasets. Then, in PRPC,
+# These need to be uploaded to PRPC in the corresponding file datasets. Then  in PRPC 
 # "converted" to DDS datasets (copied) so they can be used as secondary source and support 
 # partitioning. The "Prepare Data" data flow run will do all of this. Monitor the batch 
 # processing landing page to verify that all is completed.
 #
 # Then
-# - FillIH (data flow in InteractionsIHStyle) will take the tall format interactions and put them in IH (for months 5..16, so covering 1 year). These
+# - FillIH (data flow in InteractionsIHStyle) will take the tall format interactions and put them in IH (for months 5..16  so covering 1 year). These
 #   IH facts will be used by IH summaries and/or IH imports
-# - FillESM (data flow in SantaProducts) will take the broad format additions, runs months 5..16 through ESM and creates 
+# - FillESM (data flow in SantaProducts) will take the broad format additions  runs months 5..16 through ESM and creates 
 #   one or more datasets keyed by customerID with aggregates
 #
-# After these prep steps, the main data flow that composes them and trains and/or runs models
+# After these prep steps  the main data flow that composes them and trains and/or runs models
 # can be kicked off. The main flow lives in "Data-Customer-SantaSnapshot" and composes the
 # customer into a couple of embedded pages.
 
@@ -31,7 +31,7 @@
 # app "santa" on pegalabs http://10.60.215.32:9080/prweb/PRServlet
 # access group Santa:Administrators
 # Data-Customer-SantaSnapshot : train & test customer ID + snapshot dates
-# Data-Customer-SantaProducts : all 24 products. Datasets available with current portfolio (last month) and for training, the additions in curr month
+# Data-Customer-SantaProducts : all 24 products. Datasets available with current portfolio (last month) and for training  the additions in curr month
 # https://www.kaggle.com/c/santander-product-recommendation/data
 
 library(plyr)
@@ -107,10 +107,10 @@ print(sort(sapply(outcomefields, function(x) {return(sprintf("%.4f %%",100*lengt
 
 print("Extract profile")
 
-# Profile is really just the current customer snapshot, using the names of the test set as these don't include current portfolio
+# Profile is really just the current customer snapshot  using the names of the test set as these don't include current portfolio
 profile <- rbindlist(list(train[, names(test), with=F], test))
 
-# PRPC doesnt deal with NA's, set special value
+# PRPC doesnt deal with NA's  set special value
 portfolio[is.na(portfolio)] <- -9999
 additions[is.na(additions)] <- -9999
 profile[is.na(profile)] <- -9999
@@ -130,7 +130,7 @@ write.csv(portfolio, paste(data_folder,"santa_currentportfolio.csv",sep="/"), ro
 write.csv(additions, paste(data_folder,"santa_additions.csv",sep="/"), row.names=F)
 write.csv(profile, paste(data_folder,"santa_profile.csv",sep="/"), row.names=F)
 
-# IH-style version of the additions with customer ID, date, proposition and outcome
+# IH-style version of the additions with customer ID  date  proposition and outcome
 interactionsIHStyle <- as.data.table(additions %>% gather(key="Proposition", value="Outcome", -CustomerID, -Snapshot) %>% filter(Outcome != 0))
 setorder(interactionsIHStyle, Snapshot, CustomerID)
 cat("IH interactions:",nrow(interactionsIHStyle),"additions only:",nrow(interactionsIHStyle[Outcome==1]),fill=T)
@@ -143,13 +143,36 @@ write.csv(portfolio[CustomerID %in% midsizeCustomers, c("CustomerID", "Snapshot"
           paste(data_folder,paste("santa_snapshots-", length(midsizeCustomers), ".csv", sep=""),sep="/"), row.names=F)
 cat("IH interactions for the mid-size set:",nrow(interactionsIHStyle[CustomerID %in% midsizeCustomers]),"additions only:",nrow(interactionsIHStyle[CustomerID %in% midsizeCustomers & Outcome==1]),fill=T)
 
-# Identify a small set of active customers for testing
-
-print("Test set")
-
 # This is to help identify customers/snapshots where 1 or more products were added and/or removed at the same time
 additions[, nAdditions := rowSums(.SD==1), .SDcols=names(additions)[grepl("ind.*", names(additions))]]
 additions[, nRemovals := rowSums(.SD==-1), .SDcols=names(additions)[grepl("ind.*", names(additions))]]
+
+print("Create interaction strings to search for patterns")
+
+fldMapping <- data.table(
+  fld = c("ind_ahor_fin_ult1","ind_aval_fin_ult1","ind_cco_fin_ult1","ind_cder_fin_ult1","ind_cno_fin_ult1","ind_ctju_fin_ult1","ind_ctma_fin_ult1","ind_ctop_fin_ult1","ind_ctpp_fin_ult1","ind_deco_fin_ult1","ind_deme_fin_ult1","ind_dela_fin_ult1","ind_ecue_fin_ult1","ind_fond_fin_ult1","ind_hip_fin_ult1","ind_plan_fin_ult1","ind_pres_fin_ult1","ind_reca_fin_ult1","ind_tjcr_fin_ult1","ind_valo_fin_ult1","ind_viv_fin_ult1","ind_nomina_ult1","ind_nom_pens_ult1","ind_recibo_ult1"),
+  descr = c("Saving Account","Guarantees","Current Accounts","Derivada Account","Payroll Account","Junior Account", "Más particular Account","particular Account","particular Plus Account","Short-term deposits","Medium-term deposits","Long-term deposits","e-account","Funds","Mortgage","Pensions","Loans","Taxes","Credit Card","Securities","Home Account","Payroll","Pensions","Direct Debit"))
+fldMapping$abbr <- letters[1:nrow(fldMapping)]
+
+interactionsOnly <- copy(additions[ nAdditions>0 | nRemovals>0])
+setnames(interactionsOnly, mapvalues(tolower(names(interactionsOnly)), from=fldMapping$fld, to=fldMapping$abbr))
+i2str <- function(x) {
+  paste(toupper(paste(names(x)[x==1],collapse="")), paste(names(x)[x==-1],collapse=""),sep="")
+}
+interactionsOnly <- interactionsOnly[, interactions := apply(.SD,1,i2str), .SD=fldMapping$abbr][, c("customerid","snapshot","interactions")]
+newCustomers <- copy(profile[which(0==(profile$Snapshot - profile$fecha_alta)), c("CustomerID","Snapshot")])
+newCustomers$interactions <- "*" # to indicate new customer in the "movie"
+setnames(newCustomers,tolower(names(newCustomers)))
+interactionsAsStringsByCustomer <- spread(rbind(interactionsOnly, newCustomers),  
+                                          value="interactions", key="snapshot", fill="") 
+interactionsAsStringsByCustomer[, cbn := apply(.SD,1,paste,collapse="|"), .SDcols=setdiff(names(interactionsAsStringsByCustomer),"customerid")]
+View(interactionsAsStringsByCustomer[ grepl("J[^j]*L", cbn, ignore.case = F)]) # example regexp
+write.csv(interactionsAsStringsByCustomer,
+          paste(data_folder,
+                paste("santa_interactionstrings-", nrow(interactionsAsStringsByCustomer), ".csv",sep=""),sep="/"), 
+          row.names=F, na = "")
+
+print("Test set")
 
 # This is to help find active customers
 setkey(additions, CustomerID)
@@ -158,7 +181,7 @@ customerSummary <- additions[, list(nAdditions=sum(nAdditions), nRemovals=sum(nR
 testSetCustomers <- sort(sample( customerSummary[ nAdditions > 1, ]$CustomerID, 10 ))
 
 cat("These customers added one or more products over time:", testSetCustomers, fill=T)
-testAdditionsOverview <- additions[CustomerID %in% testSetCustomers] %>% select(CustomerID, Snapshot, nAdditions) %>% filter(nAdditions>0) %>% spread(Snapshot, nAdditions, fill=0)
+testAdditionsOverview <- data.table(additions[CustomerID %in% testSetCustomers] %>% select(CustomerID, Snapshot, nAdditions) %>% filter(nAdditions>0) %>% spread(Snapshot, nAdditions, fill=0))
 testAdditionsOverview$`Sum5-16` <- rowSums(testAdditionsOverview[, which(names(testAdditionsOverview) %in% as.character(seq(from=5,to=16))), with=F])
 testAdditionsOverview$`Sum12-16` <- rowSums(testAdditionsOverview[, which(names(testAdditionsOverview) %in% as.character(seq(from=12,to=16))), with=F])
 testAdditionsOverview$`Sum-All` <- rowSums(testAdditionsOverview[, which(names(testAdditionsOverview) %in% as.character(seq(from=1,to=18))), with=F])
